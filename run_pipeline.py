@@ -148,7 +148,8 @@ def run_pipeline(
     import torch
     
     torch.set_num_threads(4)
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"  Using device: {device}")
     
     print("=" * 70)
     print("  SLEEP STAGE CLASSIFICATION PIPELINE")
