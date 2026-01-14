@@ -326,14 +326,18 @@ class Trainer:
                 
                 if self.use_consistency:
                     aug_x1 = self.augmentor.augment_v1(batch_x)
-                    aug_x2 = self.augmentor.augment_v2(batch_x)
-                    
                     outputs_aug1 = self.model(aug_x1)
+                    del aug_x1
+                    
+                    aug_x2 = self.augmentor.augment_v2(batch_x)
                     outputs_aug2 = self.model(aug_x2)
+                    del aug_x2
                     
                     consistency_loss = self.jsd_loss([outputs, outputs_aug1, outputs_aug2])
                     loss = ce_loss + self.consistency_weight * consistency_loss
                     total_consistency_loss += consistency_loss.item()
+                    
+                    del outputs_aug1, outputs_aug2
                 else:
                     if use_mixup and np.random.random() < 0.5:
                         mixed_x, y_a, y_b, lam = mixup_data(batch_x, batch_y, mixup_alpha)
