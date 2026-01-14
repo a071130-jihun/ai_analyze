@@ -5,16 +5,19 @@ import torch.nn.functional as F
 
 
 class ConvBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3, dropout: float = 0.0):
         super().__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, padding=kernel_size // 2)
         self.bn = nn.BatchNorm2d(out_channels)
+        self.dropout = nn.Dropout2d(dropout) if dropout > 0 else None
         self.pool = nn.MaxPool2d(2)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv(x)
         x = self.bn(x)
         x = F.relu(x)
+        if self.dropout is not None:
+            x = self.dropout(x)
         x = self.pool(x)
         return x
 
@@ -30,23 +33,19 @@ class SleepStageCNN(nn.Module):
         super().__init__()
         
         self.conv_blocks = nn.Sequential(
-            ConvBlock(input_channels, 32),
-            ConvBlock(32, 64),
-            ConvBlock(64, 128),
-            ConvBlock(128, 256),
+            ConvBlock(input_channels, 32, dropout=dropout * 0.5),
+            ConvBlock(32, 64, dropout=dropout * 0.7),
+            ConvBlock(64, 128, dropout=dropout),
         )
         
         self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
         
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(256 * 4 * 4, hidden_dim),
+            nn.Linear(128 * 4 * 4, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, num_classes)
+            nn.Linear(hidden_dim, num_classes)
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -68,9 +67,9 @@ class SleepStageCRNN(nn.Module):
         super().__init__()
         
         self.conv_blocks = nn.Sequential(
-            ConvBlock(input_channels, 32),
-            ConvBlock(32, 64),
-            ConvBlock(64, 128),
+            ConvBlock(input_channels, 32, dropout=dropout * 0.5),
+            ConvBlock(32, 64, dropout=dropout * 0.7),
+            ConvBlock(64, 128, dropout=dropout),
         )
         
         self.adaptive_pool = nn.AdaptiveAvgPool2d((8, None))
@@ -122,8 +121,8 @@ class SleepStageTransformer(nn.Module):
         super().__init__()
         
         self.conv_blocks = nn.Sequential(
-            ConvBlock(input_channels, 32),
-            ConvBlock(32, 64),
+            ConvBlock(input_channels, 32, dropout=dropout * 0.5),
+            ConvBlock(32, 64, dropout=dropout),
         )
         
         self.feature_dim = 64 * 32

@@ -162,28 +162,34 @@ class PSGDataProcessor:
         edf_dir: str,
         rml_dir: str,
         subject_ids: List[str],
-        verbose: bool = True
+        verbose: bool = True,
+        return_per_subject: bool = False
     ) -> Tuple[np.ndarray, np.ndarray]:
-        all_features = []
-        all_labels = []
+        features_dict = {}
+        labels_dict = {}
         
         for i, subject_id in enumerate(subject_ids):
             if verbose:
                 print(f"\n[{i+1}/{len(subject_ids)}] Processing {subject_id}...")
             try:
                 features, labels = self.process_subject(edf_dir, rml_dir, subject_id, verbose)
-                all_features.append(features)
-                all_labels.append(labels)
+                features_dict[subject_id] = features
+                labels_dict[subject_id] = labels
                 if verbose:
                     print(f"    => {len(labels)} epochs extracted")
             except Exception as e:
                 print(f"    Error: {e}")
                 continue
         
-        if not all_features:
+        if not features_dict:
             raise ValueError("No data could be processed")
         
-        return np.concatenate(all_features), np.concatenate(all_labels)
+        if return_per_subject:
+            return features_dict, labels_dict
+        
+        all_features = np.concatenate(list(features_dict.values()))
+        all_labels = np.concatenate(list(labels_dict.values()))
+        return all_features, all_labels
 
 
 def create_data_loaders(

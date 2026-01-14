@@ -309,7 +309,7 @@ def main():
     print(f"  에포크 수: {n_epochs}")
     
     print("\n[4/5] 모델 예측 중...")
-    model = load_model(args.model, num_classes=5, device=device)
+    model = load_model(args.model, num_classes=3, device=device)
     predictions, probabilities = predict(model, features, device)
     
     print("\n[5/5] 라벨 비교 중...")

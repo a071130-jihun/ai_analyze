@@ -55,6 +55,7 @@ STAGE_NAMES_3 = {0: "Wake", 1: "NREM", 2: "REM"}
 
 
 def split_data(features, labels, test_ratio=0.2, random_seed=42):
+    """샘플 단위 분할 (단일 피험자용, deprecated)"""
     np.random.seed(random_seed)
     n_samples = len(labels)
     indices = np.random.permutation(n_samples)
@@ -73,18 +74,77 @@ def split_data(features, labels, test_ratio=0.2, random_seed=42):
     }
 
 
-def standardize_features(train_features, val_features=None, test_features=None):
-    mean = train_features.mean(axis=(0, 1, 2), keepdims=True)
-    std = train_features.std(axis=(0, 1, 2), keepdims=True) + 1e-8
+def split_data_by_subject(
+    features_per_subject: dict, 
+    labels_per_subject: dict, 
+    test_ratio: float = 0.2, 
+    random_seed: int = 42
+):
+    """피험자 단위로 Train/Test 분할 (Data Leakage 방지)
     
-    train_norm = (train_features - mean) / std
+    같은 피험자의 모든 에포크가 Train 또는 Test 중 하나에만 속함.
+    이렇게 해야 모델이 '수면 단계'를 학습하지, '개인의 뇌파 지문'을 암기하지 않음.
+    """
+    np.random.seed(random_seed)
     
-    result = {"train": train_norm, "mean": mean, "std": std}
+    subject_ids = list(features_per_subject.keys())
+    np.random.shuffle(subject_ids)
     
-    if val_features is not None:
-        result["val"] = (val_features - mean) / std
-    if test_features is not None:
-        result["test"] = (test_features - mean) / std
+    n_subjects = len(subject_ids)
+    n_test = max(1, int(n_subjects * test_ratio))
+    
+    test_subjects = subject_ids[:n_test]
+    train_subjects = subject_ids[n_test:]
+    
+    print(f"  Subject-level split:")
+    print(f"    Train subjects ({len(train_subjects)}): {train_subjects}")
+    print(f"    Test subjects ({len(test_subjects)}): {test_subjects}")
+    
+    train_features = np.concatenate([features_per_subject[s] for s in train_subjects])
+    train_labels = np.concatenate([labels_per_subject[s] for s in train_subjects])
+    test_features = np.concatenate([features_per_subject[s] for s in test_subjects])
+    test_labels = np.concatenate([labels_per_subject[s] for s in test_subjects])
+    
+    return {
+        "train_features": train_features,
+        "train_labels": train_labels,
+        "test_features": test_features,
+        "test_labels": test_labels,
+        "train_subjects": train_subjects,
+        "test_subjects": test_subjects
+    }
+
+
+def standardize_features(train_features, val_features=None, test_features=None, robust=True):
+    if robust:
+        flat = train_features.flatten()
+        p5, p50, p95 = np.percentile(flat, [5, 50, 95])
+        median = p50
+        iqr = p95 - p5 + 1e-8
+        
+        train_norm = (train_features - median) / iqr
+        train_norm = np.clip(train_norm, -3, 3)
+        
+        result = {"train": train_norm, "mean": median, "std": iqr, "robust": True}
+        
+        if val_features is not None:
+            val_norm = (val_features - median) / iqr
+            result["val"] = np.clip(val_norm, -3, 3)
+        if test_features is not None:
+            test_norm = (test_features - median) / iqr
+            result["test"] = np.clip(test_norm, -3, 3)
+    else:
+        mean = train_features.mean(axis=(0, 1, 2), keepdims=True)
+        std = train_features.std(axis=(0, 1, 2), keepdims=True) + 1e-8
+        
+        train_norm = (train_features - mean) / std
+        
+        result = {"train": train_norm, "mean": mean, "std": std, "robust": False}
+        
+        if val_features is not None:
+            result["val"] = (val_features - mean) / std
+        if test_features is not None:
+            result["test"] = (test_features - mean) / std
     
     return result
 
@@ -122,7 +182,11 @@ def create_loaders(
     train_features_norm = normalized["train"]
     val_features_norm = normalized["val"]
     
-    print(f"  Feature stats - Train mean: {normalized['mean'].mean():.4f}, std: {normalized['std'].mean():.4f}")
+    robust_tag = "(robust)" if normalized.get("robust", False) else ""
+    mean_val = normalized['mean']
+    if hasattr(mean_val, 'mean'):
+        mean_val = float(mean_val.mean())
+    print(f"  Feature stats {robust_tag} - center: {mean_val:.4f}")
     
     train_transform = get_train_transform(strength=aug_strength) if use_augmentation else None
     train_dataset = SleepStageDataset(train_features_norm, train_labels, transform=train_transform)
@@ -140,18 +204,30 @@ def create_loaders(
         
         num_samples = len(train_labels)
         
-        sampler = WeightedRandomSampler(
+        train_sampler = WeightedRandomSampler(
             weights=sample_weights,
             num_samples=num_samples,
             replacement=True
         )
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, num_workers=0)
-        print(f"  Augmentation: {aug_strength}, Balanced sampling: ON")
-        print(f"  Class weights: {dict(enumerate(class_weights[:len(class_counts)].round(2)))}")
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, num_workers=0)
+        
+        val_class_counts = np.bincount(val_labels, minlength=len(class_counts))
+        val_class_weights = 1.0 / (val_class_counts + 1e-8)
+        val_class_weights = val_class_weights / val_class_weights.min()
+        val_sample_weights = val_class_weights[val_labels]
+        
+        val_sampler = WeightedRandomSampler(
+            weights=val_sample_weights,
+            num_samples=len(val_labels),
+            replacement=True
+        )
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler, num_workers=0)
+        
+        print(f"  Augmentation: {aug_strength}, Balanced sampling: Train+Val")
+        print(f"  Train class weights: {dict(enumerate(class_weights[:len(class_counts)].round(2)))}")
     else:
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-    
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     
     print(f"  Train samples: {len(train_labels)}, Val samples: {len(val_labels)}")
     
@@ -281,14 +357,20 @@ def run_pipeline(
         print("  ERROR: No subjects found. Need either EDF files or cache.")
         return
     
+    use_subject_split = len(subject_ids) > 1
+    
     if len(subject_ids) == 1:
         features, labels = processor.process_subject(
             edf_dir, rml_dir, subject_ids[0], verbose=True
         )
+        features_per_subject = None
+        labels_per_subject = None
     else:
-        features, labels = processor.process_multiple_subjects(
-            edf_dir, rml_dir, subject_ids, verbose=True
+        features_per_subject, labels_per_subject = processor.process_multiple_subjects(
+            edf_dir, rml_dir, subject_ids, verbose=True, return_per_subject=True
         )
+        features = np.concatenate(list(features_per_subject.values()))
+        labels = np.concatenate(list(labels_per_subject.values()))
     
     print(f"\n  Total samples: {len(labels)}")
     print(f"  Feature shape: {features[0].shape}")
@@ -306,6 +388,11 @@ def run_pipeline(
         print(f"    Mapping: 0->0(Wake), 1,2,3->1(NREM), 4->2(REM)")
         labels = convert_to_3stage(labels)
         
+        if labels_per_subject is not None:
+            labels_per_subject = {
+                sid: convert_to_3stage(lbl) for sid, lbl in labels_per_subject.items()
+            }
+        
         print(f"  After 3-stage conversion:")
         for lbl in [0, 1, 2]:
             count = np.sum(labels == lbl)
@@ -313,6 +400,12 @@ def run_pipeline(
             print(f"    {name}({lbl}): {count} ({100*count/len(labels):.1f}%)")
     
     labels, label_map = remap_labels_continuous(labels)
+    
+    if labels_per_subject is not None:
+        labels_per_subject = {
+            sid: np.array([label_map[l] for l in lbl]) 
+            for sid, lbl in labels_per_subject.items()
+        }
     num_classes = len(np.unique(labels))
     
     print(f"\n  Final label mapping: {label_map}")
@@ -325,7 +418,12 @@ def run_pipeline(
         print(f"    {name} (label={new_label}): {count} samples ({100*count/len(labels):.1f}%)")
     
     print(f"\n[3/6] Splitting data (Train {int((1-test_ratio)*100)}% : Test {int(test_ratio*100)}%)...")
-    data = split_data(features, labels, test_ratio=test_ratio)
+    if use_subject_split and features_per_subject is not None:
+        print("  Using SUBJECT-LEVEL split (prevents data leakage)")
+        data = split_data_by_subject(features_per_subject, labels_per_subject, test_ratio=test_ratio)
+    else:
+        print("  Using sample-level split (single subject)")
+        data = split_data(features, labels, test_ratio=test_ratio)
     
     print(f"  Train set: {len(data['train_labels'])} samples")
     print(f"  Test set:  {len(data['test_labels'])} samples")
