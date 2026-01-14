@@ -25,8 +25,8 @@ class ModelConfig:
 class TrainConfig:
     batch_size: int = 64
     num_epochs: int = 50
-    learning_rate: float = 5e-5
-    weight_decay: float = 1e-4
+    learning_rate: float = 1e-4
+    weight_decay: float = 1e-5
     early_stopping_patience: int = 15
     train_ratio: float = 0.7
     val_ratio: float = 0.15

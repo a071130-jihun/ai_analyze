@@ -74,7 +74,7 @@ class Trainer:
         
         if class_weights is not None:
             class_weights = torch.FloatTensor(class_weights).to(self.device)
-        self.criterion = FocalLoss(alpha=class_weights, gamma=2.0)
+        self.criterion = nn.CrossEntropyLoss(weight=class_weights)
         
         self.optimizer = AdamW(
             self.model.parameters(),
@@ -238,13 +238,11 @@ class Trainer:
         self.history = checkpoint.get("history", self.history)
 
 
-def compute_class_weights(labels: np.ndarray, power: float = 1.0) -> np.ndarray:
+def compute_class_weights(labels: np.ndarray) -> np.ndarray:
     unique, counts = np.unique(labels, return_counts=True)
     total = len(labels)
     
-    freq = counts / total
-    weights = (1.0 / freq) ** power
-    weights = weights / weights.min()
+    weights = np.sqrt(total / (len(unique) * counts))
     
     full_weights = np.ones(max(unique) + 1)
     for u, w in zip(unique, weights):
