@@ -95,6 +95,7 @@ class SleepStageCRNN(nn.Module):
         batch_size = x.size(0)
         
         x = self.conv_blocks(x)
+        x = self.adaptive_pool(x)
         
         x = x.permute(0, 3, 1, 2)
         time_steps = x.size(1)
