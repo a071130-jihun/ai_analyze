@@ -170,6 +170,10 @@ def main():
     else:
         state_dict = checkpoint
     
+    if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+        print("  Removing torch.compile() prefix from state_dict...")
+        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+    
     is_sequence_model = any("backbone" in k or "temporal_lstm" in k for k in state_dict.keys())
     
     if is_sequence_model:
