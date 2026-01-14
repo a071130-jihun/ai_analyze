@@ -18,6 +18,25 @@ from sklearn.metrics import (
 from .config import TrainConfig, SLEEP_STAGE_NAMES
 
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        self.reduction = reduction
+    
+    def forward(self, inputs, targets):
+        ce_loss = nn.functional.cross_entropy(inputs, targets, weight=self.alpha, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        return focal_loss
+
+
 class EarlyStopping:
     def __init__(self, patience: int = 10, min_delta: float = 0.0):
         self.patience = patience
@@ -55,7 +74,7 @@ class Trainer:
         
         if class_weights is not None:
             class_weights = torch.FloatTensor(class_weights).to(self.device)
-        self.criterion = nn.CrossEntropyLoss(weight=class_weights)
+        self.criterion = FocalLoss(alpha=class_weights, gamma=2.0)
         
         self.optimizer = AdamW(
             self.model.parameters(),
@@ -219,10 +238,13 @@ class Trainer:
         self.history = checkpoint.get("history", self.history)
 
 
-def compute_class_weights(labels: np.ndarray) -> np.ndarray:
+def compute_class_weights(labels: np.ndarray, power: float = 1.0) -> np.ndarray:
     unique, counts = np.unique(labels, return_counts=True)
     total = len(labels)
-    weights = total / (len(unique) * counts)
+    
+    freq = counts / total
+    weights = (1.0 / freq) ** power
+    weights = weights / weights.min()
     
     full_weights = np.ones(max(unique) + 1)
     for u, w in zip(unique, weights):

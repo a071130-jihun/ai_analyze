@@ -79,15 +79,25 @@ def create_loaders(features, labels, batch_size=16, val_ratio=0.15):
     return train_loader, val_loader
 
 
-def evaluate_model(model, test_features, test_labels, device="cpu"):
+def evaluate_model(model, test_features, test_labels, device="cpu", batch_size=256):
     import torch
     
     model.eval()
-    features_tensor = torch.FloatTensor(test_features).unsqueeze(1).to(device)
+    n_samples = len(test_features)
+    all_predictions = []
     
     with torch.no_grad():
-        outputs = model(features_tensor)
-        predictions = outputs.argmax(dim=1).cpu().numpy()
+        for i in range(0, n_samples, batch_size):
+            batch = test_features[i:i+batch_size]
+            batch_tensor = torch.FloatTensor(batch).unsqueeze(1).to(device)
+            outputs = model(batch_tensor)
+            preds = outputs.argmax(dim=1).cpu().numpy()
+            all_predictions.extend(preds)
+            del batch_tensor, outputs
+            if device != "cpu":
+                torch.cuda.empty_cache()
+    
+    predictions = np.array(all_predictions)
     
     accuracy = accuracy_score(test_labels, predictions)
     f1_macro = f1_score(test_labels, predictions, average='macro', zero_division=0)
