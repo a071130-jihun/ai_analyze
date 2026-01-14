@@ -686,17 +686,6 @@ def run_pipeline(
     trainer.save_model(model_path)
     print(f"  Model saved: {model_path}")
     
-    np.savez(
-        "./output/evaluation_data.npz",
-        features=features,
-        labels=labels,
-        test_indices=data["test_indices"],
-        train_indices=data["train_indices"],
-        test_predictions=metrics["predictions"],
-        test_labels=eval_labels
-    )
-    print(f"  Data saved: ./output/evaluation_data.npz")
-    
     plot_results(metrics, history, "./output/results.png")
     
     print("\n" + "=" * 70)
