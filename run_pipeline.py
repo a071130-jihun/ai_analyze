@@ -281,25 +281,30 @@ def evaluate_model(model, test_features, test_labels, device="cpu", batch_size=2
 def evaluate_sequence_model(model, test_features, test_labels, seq_len, device="cpu", batch_size=128):
     import torch
     
+    if device != "cpu":
+        torch.cuda.empty_cache()
+        import gc
+        gc.collect()
+    
+    eval_batch_size = min(batch_size, 64)
+    
     model.eval()
     half_seq = seq_len // 2
-    
-    test_features_tensor = torch.FloatTensor(test_features).unsqueeze(1)
     
     valid_indices = list(range(half_seq, len(test_labels) - half_seq))
     all_predictions = []
     valid_labels = []
     
     with torch.no_grad():
-        for batch_start in range(0, len(valid_indices), batch_size):
-            batch_indices = valid_indices[batch_start:batch_start + batch_size]
+        for batch_start in range(0, len(valid_indices), eval_batch_size):
+            batch_indices = valid_indices[batch_start:batch_start + eval_batch_size]
             
             batch_seqs = []
             batch_labels = []
             for center_idx in batch_indices:
                 start_idx = center_idx - half_seq
                 end_idx = center_idx + half_seq + 1
-                seq = test_features_tensor[start_idx:end_idx]
+                seq = torch.FloatTensor(test_features[start_idx:end_idx]).unsqueeze(1)
                 batch_seqs.append(seq)
                 batch_labels.append(test_labels[center_idx])
             
