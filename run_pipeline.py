@@ -73,9 +73,9 @@ def split_data(features, labels, test_ratio=0.2, random_seed=42):
     }
 
 
-def create_loaders(features, labels, batch_size=16, val_ratio=0.15, use_augmentation=True):
+def create_loaders(features, labels, batch_size=16, val_ratio=0.15, use_augmentation=True, use_balanced_sampling=True):
     import torch
-    from torch.utils.data import DataLoader
+    from torch.utils.data import DataLoader, WeightedRandomSampler
     from sleep_stage_classifier.augmentation import get_train_transform
     
     n_samples = len(labels)
@@ -85,11 +85,25 @@ def create_loaders(features, labels, batch_size=16, val_ratio=0.15, use_augmenta
     val_idx = indices[:val_size]
     train_idx = indices[val_size:]
     
+    train_labels = labels[train_idx]
+    
     train_transform = get_train_transform() if use_augmentation else None
-    train_dataset = SleepStageDataset(features[train_idx], labels[train_idx], transform=train_transform)
+    train_dataset = SleepStageDataset(features[train_idx], train_labels, transform=train_transform)
     val_dataset = SleepStageDataset(features[val_idx], labels[val_idx])
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    if use_balanced_sampling:
+        class_counts = np.bincount(train_labels)
+        class_weights = 1.0 / class_counts
+        sample_weights = class_weights[train_labels]
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(train_labels),
+            replacement=True
+        )
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, num_workers=0)
+    else:
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     
     return train_loader, val_loader

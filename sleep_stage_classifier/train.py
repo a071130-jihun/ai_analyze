@@ -249,14 +249,17 @@ class Trainer:
         self.history = checkpoint.get("history", self.history)
 
 
-def compute_class_weights(labels: np.ndarray) -> np.ndarray:
+def compute_class_weights(labels: np.ndarray, power: float = 0.5) -> np.ndarray:
     unique, counts = np.unique(labels, return_counts=True)
     total = len(labels)
     
-    weights = np.sqrt(total / (len(unique) * counts))
+    freq = counts / total
+    weights = (1.0 / freq) ** power
+    weights = weights / weights.min()
     
     full_weights = np.ones(max(unique) + 1)
     for u, w in zip(unique, weights):
         full_weights[u] = w
     
+    print(f"  Class weights: {dict(zip(unique, weights))}")
     return full_weights
