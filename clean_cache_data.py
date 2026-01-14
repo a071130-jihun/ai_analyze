@@ -160,6 +160,13 @@ def save_clean_cache(clean_data, output_dir):
         print(f"  Saved: {output_file}")
 
 
+def has_sufficient_rem(labels, min_rem_pct=2.0):
+    """REM이 충분한지 확인 (3-stage용)"""
+    rem_count = np.sum(labels == 4)
+    rem_pct = 100 * rem_count / len(labels)
+    return rem_pct >= min_rem_pct
+
+
 def main():
     import argparse
     
@@ -170,6 +177,8 @@ def main():
     parser.add_argument("--min_segment", type=int, default=3, help="Minimum segment length to keep")
     parser.add_argument("--outlier_pct", type=float, default=1.0, help="Outlier percentile to remove")
     parser.add_argument("--analyze_only", action="store_true", help="Only analyze, don't clean")
+    parser.add_argument("--min_rem_pct", type=float, default=2.0, help="Minimum REM percentage to include subject")
+    parser.add_argument("--stages", type=int, default=3, choices=[3, 5], help="Target stage count (3=filter no-REM)")
     args = parser.parse_args()
     
     print("=" * 70)
@@ -193,6 +202,21 @@ def main():
     if args.analyze_only:
         print("\n  [Analyze only mode - not cleaning]")
         return
+    
+    if args.stages == 3 and args.min_rem_pct > 0:
+        print(f"\n  Filtering subjects with REM < {args.min_rem_pct}%...")
+        filtered_data = []
+        excluded = []
+        for data in all_data:
+            if has_sufficient_rem(data['labels'], args.min_rem_pct):
+                filtered_data.append(data)
+            else:
+                excluded.append(data['subject_id'])
+        
+        if excluded:
+            print(f"    Excluded {len(excluded)} subjects: {excluded[:10]}{'...' if len(excluded) > 10 else ''}")
+        all_data = filtered_data
+        print(f"    Remaining: {len(all_data)} subjects")
     
     print(f"\n[3/3] Cleaning data...")
     print(f"  Settings:")

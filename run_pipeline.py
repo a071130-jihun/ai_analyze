@@ -410,7 +410,7 @@ def run_pipeline(
     print("=" * 70)
     
     print("\n[1/6] Loading data...")
-    cache_dir = "./cache"
+    cache_dir = "./cache_clean" if os.path.exists("./cache_clean") else "./cache"
     processor = PSGDataProcessor(
         audio_config=AudioConfig(),
         use_librosa=False,
