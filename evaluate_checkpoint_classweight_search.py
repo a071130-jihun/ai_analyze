@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Checkpoint evaluation with post-processing verification.
+Grid search class weights for probability calibration.
 Usage:
-  CNN:  python evaluate_checkpoint_postprocess.py --model ./output/sleep_stage_cnn.pt --stages 3
-  CRNN: python evaluate_checkpoint_postprocess.py --model ./output/sleep_stage_crnn.pt --stages 3 --seq_len 11
+  python evaluate_checkpoint_classweight_search.py --model ./output/sleep_stage_cnn.pt --stages 3
 """
 import sys
 import os
@@ -12,12 +11,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import argparse
 import glob
 import pickle
+import itertools
 import numpy as np
 import torch
-from sklearn.metrics import (
-    accuracy_score, f1_score, cohen_kappa_score,
-    classification_report, confusion_matrix
-)
+from sklearn.metrics import accuracy_score, f1_score, cohen_kappa_score
 
 from sleep_stage_classifier.models.classifier import get_model
 from sleep_stage_classifier.models.sequence_model import (
@@ -147,8 +144,6 @@ def evaluate_sequence(model, features, labels, seq_len, device="cuda", batch_siz
 
 
 def apply_class_weights(probs, weights):
-    if weights is None:
-        return probs
     weights = np.asarray(weights, dtype=np.float32)
     if weights.ndim != 1:
         raise ValueError("class_weights must be a 1D array")
@@ -158,90 +153,6 @@ def apply_class_weights(probs, weights):
     row_sums = weighted.sum(axis=1, keepdims=True)
     row_sums = np.where(row_sums == 0, 1.0, row_sums)
     return weighted / row_sums
-
-
-def apply_majority_vote(preds, window, num_classes):
-    if window <= 1:
-        return preds.copy()
-    if window % 2 == 0:
-        raise ValueError("window must be an odd number")
-    pad = window // 2
-    padded = np.pad(preds, (pad, pad), mode="edge")
-    output = np.empty_like(preds)
-    for i in range(len(preds)):
-        window_vals = padded[i:i + window]
-        counts = np.bincount(window_vals, minlength=num_classes)
-        max_count = counts.max()
-        candidates = np.flatnonzero(counts == max_count)
-        if len(candidates) == 1:
-            output[i] = candidates[0]
-        else:
-            center = preds[i]
-            output[i] = center if center in candidates else candidates[0]
-    return output
-
-
-def apply_prob_average(probs, window):
-    if window <= 1:
-        return probs.copy()
-    if window % 2 == 0:
-        raise ValueError("window must be an odd number")
-    pad = window // 2
-    padded = np.pad(probs, ((pad, pad), (0, 0)), mode="edge")
-    output = np.zeros_like(probs)
-    for i in range(len(probs)):
-        output[i] = padded[i:i + window].mean(axis=0)
-    return output
-
-
-def enforce_min_run(preds, min_len):
-    if min_len <= 1:
-        return preds.copy()
-    output = preds.copy()
-    runs = []
-    start = 0
-    for i in range(1, len(preds) + 1):
-        if i == len(preds) or preds[i] != preds[start]:
-            runs.append((start, i, preds[start]))
-            start = i
-    for idx, (start, end, label) in enumerate(runs):
-        run_len = end - start
-        if run_len >= min_len:
-            continue
-        left = runs[idx - 1] if idx - 1 >= 0 else None
-        right = runs[idx + 1] if idx + 1 < len(runs) else None
-        if left is None and right is None:
-            continue
-        if left is None:
-            replacement = right[2]
-        elif right is None:
-            replacement = left[2]
-        else:
-            if left[2] == right[2]:
-                replacement = left[2]
-            else:
-                left_len = left[1] - left[0]
-                right_len = right[1] - right[0]
-                replacement = left[2] if left_len >= right_len else right[2]
-        output[start:end] = replacement
-    return output
-
-
-def postprocess_predictions(preds, probs, num_classes, method, window, min_run):
-    if method == "none":
-        processed = preds.copy()
-    elif method == "majority":
-        processed = apply_majority_vote(preds, window, num_classes)
-    elif method == "prob_avg":
-        smoothed_probs = apply_prob_average(probs, window)
-        processed = smoothed_probs.argmax(axis=1)
-    else:
-        raise ValueError(f"Unknown postprocess method: {method}")
-
-    if min_run > 1:
-        processed = enforce_min_run(processed, min_run)
-
-    return processed
 
 
 def compute_metrics(labels, predictions):
@@ -257,81 +168,34 @@ def compute_metrics(labels, predictions):
     }
 
 
-def kappa_level(kappa):
-    if kappa < 0.20:
-        return "Poor"
-    if kappa < 0.40:
-        return "Fair"
-    if kappa < 0.60:
-        return "Moderate"
-    if kappa < 0.80:
-        return "Substantial"
-    return "Almost Perfect"
+def parse_float_list(value):
+    return [float(x.strip()) for x in value.split(",") if x.strip()]
 
 
-def print_report(title, labels, predictions, stage_names):
-    metrics = compute_metrics(labels, predictions)
-    print("\n" + "=" * 70)
-    print(f"  {title}")
-    print("=" * 70)
-    print(f"\n  Accuracy:      {metrics['accuracy']*100:.1f}%")
-    print(f"  F1 (macro):    {metrics['f1_macro']:.4f}")
-    print(f"  F1 (weighted): {metrics['f1_weighted']:.4f}")
-    print(f"  Cohen's Kappa: {metrics['kappa']:.4f}")
-    print(f"  Kappa Level:   {kappa_level(metrics['kappa'])}")
-
-    present_classes = sorted(set(labels) | set(predictions))
-    target_names = [stage_names.get(i, f"Class_{i}") for i in present_classes]
-
-    print("\n" + "-" * 70)
-    print("  Classification Report:")
-    print("-" * 70)
-    print(classification_report(
-        labels,
-        predictions,
-        labels=present_classes,
-        target_names=target_names,
-        zero_division=0,
-    ))
-
-    print("-" * 70)
-    print("  Confusion Matrix:")
-    print("-" * 70)
-    cm = confusion_matrix(labels, predictions, labels=present_classes)
-
-    header = "        " + "  ".join([f"{name:>6}" for name in target_names])
-    print(header)
-    print("        " + "-" * (len(target_names) * 8))
-    for i, row in enumerate(cm):
-        row_str = "  ".join([f"{v:>6}" for v in row])
-        print(f"{target_names[i]:>6} | {row_str}")
-
-    print("\n" + "-" * 70)
-    print("  Class Distribution:")
-    print("-" * 70)
-    unique, counts = np.unique(labels, return_counts=True)
-    for u, c in zip(unique, counts):
-        name = stage_names.get(u, f"Class_{u}")
-        pred_count = np.sum(predictions == u)
-        recall = np.sum((predictions == u) & (labels == u)) / c if c > 0 else 0
-        print(f"    {name}: {c} actual, {pred_count} predicted (recall: {recall*100:.1f}%)")
-
-    return metrics
+def parse_class_weight_grids(value, num_classes):
+    parts = [p.strip() for p in value.split("|") if p.strip()]
+    if len(parts) != num_classes:
+        raise ValueError(f"--class_weight_grids needs {num_classes} parts, got {len(parts)}")
+    grids = [parse_float_list(p) for p in parts]
+    if any(len(g) == 0 for g in grids):
+        raise ValueError("--class_weight_grids contains empty grid")
+    return grids
 
 
-def print_metric_delta(raw, post):
-    print("\n" + "-" * 70)
-    print("  Metric Delta (post - raw)")
-    print("-" * 70)
-    acc_delta = (post["accuracy"] - raw["accuracy"]) * 100
-    print(f"  Accuracy:      {raw['accuracy']*100:.1f}% -> {post['accuracy']*100:.1f}% ({acc_delta:+.1f}%)")
-    print(f"  F1 (macro):    {raw['f1_macro']:.4f} -> {post['f1_macro']:.4f} ({post['f1_macro']-raw['f1_macro']:+.4f})")
-    print(f"  F1 (weighted): {raw['f1_weighted']:.4f} -> {post['f1_weighted']:.4f} ({post['f1_weighted']-raw['f1_weighted']:+.4f})")
-    print(f"  Cohen's Kappa: {raw['kappa']:.4f} -> {post['kappa']:.4f} ({post['kappa']-raw['kappa']:+.4f})")
+def write_csv(path, rows, num_classes):
+    header = [
+        "weights",
+        "accuracy", "f1_macro", "f1_weighted", "kappa",
+        "delta_accuracy", "delta_f1_macro", "delta_f1_weighted", "delta_kappa",
+    ]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(",".join(header) + "\n")
+        for row in rows:
+            f.write(",".join(str(row[h]) for h in header) + "\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate saved model checkpoint with post-processing")
+    parser = argparse.ArgumentParser(description="Grid search class weights for probability calibration")
     parser.add_argument("--model", required=True, help="Path to model checkpoint (.pt file)")
     parser.add_argument(
         "--model_type",
@@ -345,26 +209,24 @@ def main():
     parser.add_argument("--seq_len", type=int, default=0, help="Sequence length (0=auto detect, >0 for sequence model)")
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size for evaluation")
     parser.add_argument(
-        "--postprocess",
-        default="majority",
-        choices=["none", "majority", "prob_avg"],
-        help="Postprocess method",
+        "--weight_grid",
+        default="0.8,1.0,1.2,1.4,1.6",
+        help="Comma-separated weight grid applied to all classes (if class_weight_grids not set)",
     )
-    parser.add_argument("--window", type=int, default=5, help="Smoothing window size (odd number)")
-    parser.add_argument("--min_run", type=int, default=1, help="Minimum run length to keep (>=1)")
     parser.add_argument(
-        "--class_weights",
+        "--class_weight_grids",
         default="",
-        help="Comma-separated class weights (e.g. '1.0,1.0,1.5') applied to probabilities",
+        help="Per-class grids separated by '|' (e.g. '1.0|0.9,1.0,1.1|1.0,1.2')",
     )
+    parser.add_argument(
+        "--sort",
+        default="f1_macro",
+        choices=["f1_macro", "f1_weighted", "accuracy", "kappa"],
+        help="Metric to sort by",
+    )
+    parser.add_argument("--top_k", type=int, default=20, help="Show top K results")
+    parser.add_argument("--out_csv", default="", help="Optional CSV output path")
     args = parser.parse_args()
-
-    if args.window <= 0:
-        raise ValueError("--window must be >= 1")
-    if args.window % 2 == 0:
-        raise ValueError("--window must be an odd number")
-    if args.min_run <= 0:
-        raise ValueError("--min_run must be >= 1")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
@@ -444,6 +306,7 @@ def main():
     labels, label_map = remap_labels(labels)
     print(f"  Label mapping: {label_map}")
     print(f"  Classes: {len(label_map)}")
+    print(f"  Stage names: {stage_names}")
 
     print(f"\n[3/4] Splitting data (seed=42, test_ratio={args.test_ratio})...")
     np.random.seed(42)
@@ -461,10 +324,9 @@ def main():
     print("\n  Standardizing features (robust)...")
     test_features_norm = standardize_features(test_features, robust=True)
 
-    print("\n[4/4] Evaluating...")
-
+    print("\n[4/4] Evaluating (single pass)...")
     if is_sequence_model:
-        predictions, probabilities, test_labels = evaluate_sequence(
+        _, probabilities, test_labels = evaluate_sequence(
             model,
             test_features_norm,
             test_labels,
@@ -473,42 +335,73 @@ def main():
             batch_size=args.batch_size,
         )
     else:
-        predictions, probabilities = evaluate_batch(
+        _, probabilities = evaluate_batch(
             model,
             test_features_norm,
             device=device,
             batch_size=args.batch_size,
         )
 
-    class_weights = None
-    if args.class_weights:
-        class_weights = [float(x.strip()) for x in args.class_weights.split(",") if x.strip()]
-        if len(class_weights) != num_classes:
-            raise ValueError(f"--class_weights length {len(class_weights)} != num_classes {num_classes}")
-        print(f"\n  Class weights: {class_weights}")
-        probabilities = apply_class_weights(probabilities, class_weights)
-        predictions = probabilities.argmax(axis=1)
+    raw_predictions = probabilities.argmax(axis=1)
+    raw_metrics = compute_metrics(test_labels, raw_predictions)
+    print("\nRaw metrics")
+    print(f"  Accuracy:      {raw_metrics['accuracy']*100:.1f}%")
+    print(f"  F1 (macro):    {raw_metrics['f1_macro']:.4f}")
+    print(f"  F1 (weighted): {raw_metrics['f1_weighted']:.4f}")
+    print(f"  Cohen's Kappa: {raw_metrics['kappa']:.4f}")
 
-    raw_metrics = print_report("EVALUATION RESULTS (RAW)", test_labels, predictions, stage_names)
+    if args.class_weight_grids:
+        grids = parse_class_weight_grids(args.class_weight_grids, num_classes)
+    else:
+        grid = parse_float_list(args.weight_grid)
+        if len(grid) == 0:
+            raise ValueError("--weight_grid is empty")
+        grids = [grid for _ in range(num_classes)]
 
-    if args.postprocess == "none" and args.min_run <= 1:
-        print("\n" + "=" * 70)
-        print("  Post-processing skipped (use --postprocess or --min_run)")
-        print("=" * 70)
-        return
+    if any(any(w <= 0 for w in g) for g in grids):
+        raise ValueError("class weights must be > 0")
 
-    print("\nApplying post-processing...")
-    post_preds = postprocess_predictions(
-        predictions,
-        probabilities,
-        num_classes=num_classes,
-        method=args.postprocess,
-        window=args.window,
-        min_run=args.min_run,
+    combos = list(itertools.product(*grids))
+    print(f"\nSearching {len(combos)} weight combinations...")
+
+    results = []
+    for weights in combos:
+        weighted_probs = apply_class_weights(probabilities, weights)
+        preds = weighted_probs.argmax(axis=1)
+        metrics = compute_metrics(test_labels, preds)
+        row = {
+            "weights": "|".join(f"{w:.4f}" for w in weights),
+            "accuracy": metrics["accuracy"],
+            "f1_macro": metrics["f1_macro"],
+            "f1_weighted": metrics["f1_weighted"],
+            "kappa": metrics["kappa"],
+            "delta_accuracy": metrics["accuracy"] - raw_metrics["accuracy"],
+            "delta_f1_macro": metrics["f1_macro"] - raw_metrics["f1_macro"],
+            "delta_f1_weighted": metrics["f1_weighted"] - raw_metrics["f1_weighted"],
+            "delta_kappa": metrics["kappa"] - raw_metrics["kappa"],
+        }
+        results.append(row)
+
+    results.sort(key=lambda r: r[args.sort], reverse=True)
+
+    print("\nTop results")
+    header = (
+        "weights                         "
+        "acc    f1_macro  f1_weighted  kappa   "
+        "d_acc  d_f1_macro  d_f1_weighted  d_kappa"
     )
+    print(header)
+    print("-" * len(header))
+    for row in results[:max(args.top_k, 1)]:
+        print(
+            f"{row['weights']:<30} "
+            f"{row['accuracy']*100:>5.1f}  {row['f1_macro']:>8.4f}  {row['f1_weighted']:>11.4f}  {row['kappa']:>6.4f}  "
+            f"{row['delta_accuracy']*100:>+5.1f}  {row['delta_f1_macro']:>+10.4f}  {row['delta_f1_weighted']:>+13.4f}  {row['delta_kappa']:>+8.4f}"
+        )
 
-    post_metrics = print_report("EVALUATION RESULTS (POST-PROCESSED)", test_labels, post_preds, stage_names)
-    print_metric_delta(raw_metrics, post_metrics)
+    if args.out_csv:
+        write_csv(args.out_csv, results, num_classes)
+        print(f"\nSaved CSV: {args.out_csv}")
 
 
 if __name__ == "__main__":
