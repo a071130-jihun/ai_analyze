@@ -20,7 +20,7 @@ from sklearn.metrics import (
 )
 
 from sleep_stage_classifier.models.classifier import get_model
-from sleep_stage_classifier.models.sequence_model import SleepSequenceModel
+from sleep_stage_classifier.models.sequence_model import SleepSequenceModel, DeepSleepResNet, DeepSleepResNetLarge
 
 STAGE_NAMES_5 = {0: "Wake", 1: "N1", 2: "N2", 3: "N3", 4: "REM"}
 STAGE_NAMES_3 = {0: "Wake", 1: "NREM", 2: "REM"}
@@ -145,6 +145,9 @@ def evaluate_sequence(model, features, labels, seq_len, device="cuda", batch_siz
 def main():
     parser = argparse.ArgumentParser(description="Evaluate saved model checkpoint")
     parser.add_argument("--model", required=True, help="Path to model checkpoint (.pt file)")
+    parser.add_argument("--model_type", default="auto", 
+                        choices=["auto", "cnn", "sequence", "deep_resnet", "deep_resnet_large"],
+                        help="Model type (default: auto-detect)")
     parser.add_argument("--cache", default="./cache", help="Cache directory")
     parser.add_argument("--stages", type=int, default=3, choices=[3, 5], help="Number of stages")
     parser.add_argument("--test_ratio", type=float, default=0.2, help="Test ratio")
@@ -177,15 +180,37 @@ def main():
         print("  Removing torch.compile() prefix from state_dict...")
         state_dict = {k.replace("_orig_mod.", "", 1): v for k, v in state_dict.items()}
     
-    is_sequence_model = any("backbone" in k or "temporal_lstm" in k for k in state_dict.keys())
+    if args.model_type == "auto":
+        has_stage4 = any("stage4" in k for k in state_dict.keys())
+        has_stage3_only = any("stage3" in k for k in state_dict.keys()) and not has_stage4
+        is_sequence_model = any("backbone" in k or "temporal_lstm" in k for k in state_dict.keys())
+        is_deep_resnet_large = has_stage4 and any("stem" in k for k in state_dict.keys()) and not is_sequence_model
+        is_deep_resnet = has_stage3_only and any("stem" in k for k in state_dict.keys()) and not is_sequence_model
+        
+        if is_deep_resnet_large:
+            model_type = "deep_resnet_large"
+        elif is_deep_resnet:
+            model_type = "deep_resnet"
+        elif is_sequence_model:
+            model_type = "sequence"
+        else:
+            model_type = "cnn"
+        print(f"  Auto-detected model type: {model_type}")
+    else:
+        model_type = args.model_type
+        print(f"  Using specified model type: {model_type}")
     
-    if is_sequence_model:
+    if model_type == "deep_resnet_large":
+        seq_len = 0
+        model = DeepSleepResNetLarge(num_classes=num_classes)
+    elif model_type == "deep_resnet":
+        seq_len = 0
+        model = DeepSleepResNet(num_classes=num_classes)
+    elif model_type == "sequence":
         seq_len = args.seq_len if args.seq_len > 0 else 11
-        print(f"  Detected: Sequence Model (seq_len={seq_len})")
         model = SleepSequenceModel(num_classes=num_classes, hidden_dim=256, seq_len=seq_len)
     else:
         seq_len = 0
-        print(f"  Detected: CNN Model")
         model = get_model(model_type="cnn", num_classes=num_classes)
     
     model.load_state_dict(state_dict)
