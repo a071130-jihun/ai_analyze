@@ -163,7 +163,8 @@ def create_loaders(
     use_balanced_sampling=True,
     aug_strength="medium",
     oversample_factor=1.0,
-    random_seed=42
+    random_seed=42,
+    num_workers=4
 ):
     import torch
     from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -219,11 +220,11 @@ def create_loaders(
         )
         train_loader = DataLoader(
             train_dataset, batch_size=batch_size, sampler=train_sampler, 
-            num_workers=4, pin_memory=True, persistent_workers=True
+            num_workers=num_workers, pin_memory=True, persistent_workers=num_workers > 0
         )
         val_loader = DataLoader(
             val_dataset, batch_size=batch_size, shuffle=False, 
-            num_workers=4, pin_memory=True, persistent_workers=True
+            num_workers=num_workers, pin_memory=True, persistent_workers=num_workers > 0
         )
         
         print(f"  Augmentation: {aug_strength}, Balanced sampling: SOFT (sqrt + clip 3.0)")
@@ -231,11 +232,11 @@ def create_loaders(
     else:
         train_loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True, 
-            num_workers=4, pin_memory=True, persistent_workers=True
+            num_workers=num_workers, pin_memory=True, persistent_workers=num_workers > 0
         )
         val_loader = DataLoader(
             val_dataset, batch_size=batch_size, shuffle=False, 
-            num_workers=4, pin_memory=True, persistent_workers=True
+            num_workers=num_workers, pin_memory=True, persistent_workers=num_workers > 0
         )
     
     print(f"  Train samples: {len(train_labels)}, Val samples: {len(val_labels)}")
@@ -397,13 +398,23 @@ def run_pipeline(
     focal_gamma: float = 2.0,
     use_consistency: bool = True,
     consistency_weight: float = 1.0,
-    multi_gpu: bool = True
+    multi_gpu: bool = True,
+    num_workers: int = None,
+    num_threads: int = None
 ):
     import torch
     
-    torch.set_num_threads(4)
+    cpu_count = os.cpu_count() or 4
+    if num_threads is None:
+        num_threads = min(32, cpu_count)
+    torch.set_num_threads(num_threads)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"  Using device: {device}")
+    print(f"  CPU threads: {num_threads}")
+    
+    if num_workers is None:
+        num_workers = min(32, cpu_count)
+    print(f"  DataLoader workers: {num_workers}")
     
     stage_names = STAGE_NAMES if num_stages == 5 else STAGE_NAMES_3
     
@@ -563,17 +574,22 @@ def run_pipeline(
             seq_len=seq_len,
             batch_size=batch_size,
             train_transform=train_transform,
-            num_workers=4
+            num_workers=num_workers
         )
         print(f"  Sequence length: {seq_len} epochs ({seq_len * 30}s context)")
     else:
+        use_balanced_sampling = not use_focal
+        if not use_balanced_sampling:
+            print("  Balanced sampling: DISABLED (using focal loss class weights)")
         train_loader, val_loader, feat_mean, feat_std = create_loaders(
             data["train_features"], 
             data["train_labels"],
             batch_size=batch_size,
             val_ratio=0.15,
             aug_strength=aug_strength,
-            oversample_factor=oversample_factor
+            oversample_factor=oversample_factor,
+            use_balanced_sampling=use_balanced_sampling,
+            num_workers=num_workers
         )
     
     print(f"  Train batches: {len(train_loader)}")
@@ -624,6 +640,8 @@ def run_pipeline(
         print(f"    {name}: {count} ({100*count/len(data['test_labels']):.1f}%)")
     
     test_features_norm = (data["test_features"] - feat_mean) / feat_std
+    if not use_sequence:
+        test_features_norm = np.clip(test_features_norm, -3, 3)
     
     if use_sequence:
         metrics = evaluate_sequence_model(
@@ -717,6 +735,10 @@ if __name__ == "__main__":
     parser.add_argument("--multi_gpu", action="store_true", default=True,
                         help="Use multiple GPUs if available (default: True)")
     parser.add_argument("--single_gpu", action="store_true", help="Force single GPU")
+    parser.add_argument("--num_workers", type=int, default=None,
+                        help="DataLoader worker processes (default: min(32, cpu_count))")
+    parser.add_argument("--num_threads", type=int, default=None,
+                        help="PyTorch intraop CPU threads (default: min(32, cpu_count))")
     args = parser.parse_args()
     
     run_pipeline(
@@ -734,5 +756,7 @@ if __name__ == "__main__":
         focal_gamma=args.focal_gamma,
         use_consistency=not args.no_consistency,
         consistency_weight=args.consistency_weight,
-        multi_gpu=not args.single_gpu
+        multi_gpu=not args.single_gpu,
+        num_workers=args.num_workers,
+        num_threads=args.num_threads
     )

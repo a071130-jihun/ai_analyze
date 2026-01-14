@@ -1,4 +1,5 @@
 from typing import Dict, Tuple, Optional
+import copy
 from pathlib import Path
 import numpy as np
 import os
@@ -321,8 +322,9 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             
             with torch.amp.autocast('cuda', enabled=self.use_amp):
-                outputs = self.model(batch_x)
-                ce_loss = self.criterion(outputs, batch_y)
+                base_outputs = self.model(batch_x)
+                ce_loss = self.criterion(base_outputs, batch_y)
+                outputs_for_metrics = base_outputs
                 
                 if self.use_consistency:
                     aug_x1 = self.augmentor.augment_v1(batch_x)
@@ -333,7 +335,7 @@ class Trainer:
                     outputs_aug2 = self.model(aug_x2)
                     del aug_x2
                     
-                    consistency_loss = self.jsd_loss([outputs, outputs_aug1, outputs_aug2])
+                    consistency_loss = self.jsd_loss([base_outputs, outputs_aug1, outputs_aug2])
                     loss = ce_loss + self.consistency_weight * consistency_loss
                     total_consistency_loss += consistency_loss.item()
                     
@@ -341,8 +343,8 @@ class Trainer:
                 else:
                     if use_mixup and np.random.random() < 0.5:
                         mixed_x, y_a, y_b, lam = mixup_data(batch_x, batch_y, mixup_alpha)
-                        outputs = self.model(mixed_x)
-                        loss = mixup_criterion(self.criterion, outputs, y_a, y_b, lam)
+                        mixup_outputs = self.model(mixed_x)
+                        loss = mixup_criterion(self.criterion, mixup_outputs, y_a, y_b, lam)
                     else:
                         loss = ce_loss
             
@@ -358,7 +360,7 @@ class Trainer:
                 self.optimizer.step()
             
             total_loss += loss.item()
-            preds = outputs.argmax(dim=1).cpu().numpy()
+            preds = outputs_for_metrics.argmax(dim=1).cpu().numpy()
             all_preds.extend(preds)
             all_labels.extend(batch_y.cpu().numpy())
         
@@ -454,7 +456,7 @@ class Trainer:
             
             if self._is_better(current_metric):
                 self.best_val_metric = current_metric
-                best_model_state = self.model.state_dict().copy()
+                best_model_state = copy.deepcopy(self.model.state_dict())
                 self._save_best_model(epoch, current_metric)
             
             if self.early_stopping(val_metrics["loss"]):

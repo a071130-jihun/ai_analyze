@@ -235,13 +235,12 @@ def get_train_transform(strength: str = "medium"):
     
     elif strength == "strong":
         return Compose([
-            SpecAugment(freq_mask_param=30, time_mask_param=35, n_freq_masks=3, n_time_masks=3, p=0.7),
-            SNRNoise(snr_min=-5, snr_max=15, p=0.5),
-            TimeStretch(min_rate=0.85, max_rate=1.15, p=0.4),
-            TimeShift(max_shift=15, p=0.4),
-            FrequencyShift(max_shift=5, p=0.4),
-            RandomCutout(n_holes=2, max_h=15, max_w=15, p=0.4),
-            RandomGain(min_gain=0.7, max_gain=1.3, p=0.4),
+            SpecAugment(freq_mask_param=28, time_mask_param=32, n_freq_masks=2, n_time_masks=2, p=0.65),
+            SNRNoise(snr_min=-3, snr_max=12, p=0.45),
+            TimeShift(max_shift=12, p=0.35),
+            FrequencyShift(max_shift=4, p=0.35),
+            RandomCutout(n_holes=2, max_h=12, max_w=12, p=0.3),
+            RandomGain(min_gain=0.75, max_gain=1.25, p=0.35),
         ])
     
     elif strength == "aggressive":
