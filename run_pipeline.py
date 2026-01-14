@@ -73,6 +73,22 @@ def split_data(features, labels, test_ratio=0.2, random_seed=42):
     }
 
 
+def standardize_features(train_features, val_features=None, test_features=None):
+    mean = train_features.mean(axis=(0, 1, 2), keepdims=True)
+    std = train_features.std(axis=(0, 1, 2), keepdims=True) + 1e-8
+    
+    train_norm = (train_features - mean) / std
+    
+    result = {"train": train_norm, "mean": mean, "std": std}
+    
+    if val_features is not None:
+        result["val"] = (val_features - mean) / std
+    if test_features is not None:
+        result["test"] = (test_features - mean) / std
+    
+    return result
+
+
 def create_loaders(
     features, 
     labels, 
@@ -81,11 +97,14 @@ def create_loaders(
     use_augmentation=True, 
     use_balanced_sampling=True,
     aug_strength="medium",
-    oversample_factor=2.0
+    oversample_factor=1.0,
+    random_seed=42
 ):
     import torch
     from torch.utils.data import DataLoader, WeightedRandomSampler
     from sleep_stage_classifier.augmentation import get_train_transform
+    
+    np.random.seed(random_seed)
     
     n_samples = len(labels)
     indices = np.random.permutation(n_samples)
@@ -94,19 +113,32 @@ def create_loaders(
     val_idx = indices[:val_size]
     train_idx = indices[val_size:]
     
+    train_features = features[train_idx]
+    val_features = features[val_idx]
     train_labels = labels[train_idx]
+    val_labels = labels[val_idx]
+    
+    normalized = standardize_features(train_features, val_features)
+    train_features_norm = normalized["train"]
+    val_features_norm = normalized["val"]
+    
+    print(f"  Feature stats - Train mean: {normalized['mean'].mean():.4f}, std: {normalized['std'].mean():.4f}")
     
     train_transform = get_train_transform(strength=aug_strength) if use_augmentation else None
-    train_dataset = SleepStageDataset(features[train_idx], train_labels, transform=train_transform)
-    val_dataset = SleepStageDataset(features[val_idx], labels[val_idx])
+    train_dataset = SleepStageDataset(train_features_norm, train_labels, transform=train_transform)
+    val_dataset = SleepStageDataset(val_features_norm, val_labels)
     
     if use_balanced_sampling:
         class_counts = np.bincount(train_labels)
-        max_count = class_counts.max()
-        class_weights = (max_count / class_counts) ** oversample_factor
+        class_weights = 1.0 / (class_counts + 1e-8)
+        class_weights = class_weights / class_weights.min()
+        
+        if oversample_factor > 1.0:
+            class_weights = class_weights ** oversample_factor
+        
         sample_weights = class_weights[train_labels]
         
-        num_samples = int(len(train_labels) * (1 + oversample_factor * 0.5))
+        num_samples = len(train_labels)
         
         sampler = WeightedRandomSampler(
             weights=sample_weights,
@@ -114,14 +146,16 @@ def create_loaders(
             replacement=True
         )
         train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, num_workers=0)
-        print(f"  Augmentation: {aug_strength}, Oversample factor: {oversample_factor}")
-        print(f"  Effective samples per epoch: {num_samples}")
+        print(f"  Augmentation: {aug_strength}, Balanced sampling: ON")
+        print(f"  Class weights: {dict(enumerate(class_weights[:len(class_counts)].round(2)))}")
     else:
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
     
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     
-    return train_loader, val_loader
+    print(f"  Train samples: {len(train_labels)}, Val samples: {len(val_labels)}")
+    
+    return train_loader, val_loader, normalized["mean"], normalized["std"]
 
 
 def evaluate_model(model, test_features, test_labels, device="cpu", batch_size=256):
@@ -298,7 +332,7 @@ def run_pipeline(
     print(f"  Parameters: {param_count:,}")
     
     print(f"\n[5/6] Training for {epochs} epochs...")
-    train_loader, val_loader = create_loaders(
+    train_loader, val_loader, feat_mean, feat_std = create_loaders(
         data["train_features"], 
         data["train_labels"],
         batch_size=batch_size,
@@ -333,7 +367,8 @@ def run_pipeline(
     print(f"\n  Model saved: {model_path}")
     
     print(f"\n[6/6] Evaluating on TEST SET...")
-    metrics = evaluate_model(model, data["test_features"], data["test_labels"], device)
+    test_features_norm = (data["test_features"] - feat_mean) / feat_std
+    metrics = evaluate_model(model, test_features_norm, data["test_labels"], device)
     
     print("\n" + "=" * 70)
     print("  FINAL RESULTS (TEST SET - NOT SEEN DURING TRAINING)")
