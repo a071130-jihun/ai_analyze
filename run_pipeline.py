@@ -14,6 +14,7 @@ from sleep_stage_classifier.config import AudioConfig, ModelConfig, TrainConfig,
 from sleep_stage_classifier.data.edf_reader import find_subject_ids
 from sleep_stage_classifier.data.dataset import PSGDataProcessor, SleepStageDataset
 from sleep_stage_classifier.models.classifier import get_model
+from sleep_stage_classifier.models.sequence_model import SleepSequenceModel, SequenceDataset, create_sequence_loaders
 from sleep_stage_classifier.train import Trainer, compute_class_weights
 
 EDF_DIR = "./APNEA_EDF"
@@ -277,6 +278,60 @@ def evaluate_model(model, test_features, test_labels, device="cpu", batch_size=2
     }
 
 
+def evaluate_sequence_model(model, test_features, test_labels, seq_len, device="cpu", batch_size=128):
+    import torch
+    
+    model.eval()
+    half_seq = seq_len // 2
+    
+    test_features_tensor = torch.FloatTensor(test_features).unsqueeze(1)
+    
+    valid_indices = list(range(half_seq, len(test_labels) - half_seq))
+    all_predictions = []
+    valid_labels = []
+    
+    with torch.no_grad():
+        for batch_start in range(0, len(valid_indices), batch_size):
+            batch_indices = valid_indices[batch_start:batch_start + batch_size]
+            
+            batch_seqs = []
+            batch_labels = []
+            for center_idx in batch_indices:
+                start_idx = center_idx - half_seq
+                end_idx = center_idx + half_seq + 1
+                seq = test_features_tensor[start_idx:end_idx]
+                batch_seqs.append(seq)
+                batch_labels.append(test_labels[center_idx])
+            
+            batch_tensor = torch.stack(batch_seqs).to(device)
+            outputs = model(batch_tensor)
+            preds = outputs.argmax(dim=1).cpu().numpy()
+            
+            all_predictions.extend(preds)
+            valid_labels.extend(batch_labels)
+            
+            del batch_tensor, outputs
+            if device != "cpu":
+                torch.cuda.empty_cache()
+    
+    predictions = np.array(all_predictions)
+    valid_labels = np.array(valid_labels)
+    
+    accuracy = accuracy_score(valid_labels, predictions)
+    f1_macro = f1_score(valid_labels, predictions, average='macro', zero_division=0)
+    f1_weighted = f1_score(valid_labels, predictions, average='weighted', zero_division=0)
+    kappa = cohen_kappa_score(valid_labels, predictions)
+    
+    return {
+        "accuracy": accuracy,
+        "f1_macro": f1_macro,
+        "f1_weighted": f1_weighted,
+        "kappa": kappa,
+        "predictions": predictions,
+        "labels": valid_labels
+    }
+
+
 def plot_results(metrics, history, save_path="./results.png"):
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
@@ -331,7 +386,10 @@ def run_pipeline(
     batch_size: int = 16,
     num_stages: int = 5,
     aug_strength: str = "medium",
-    oversample_factor: float = 1.0
+    oversample_factor: float = 1.0,
+    seq_len: int = 1,
+    use_focal: bool = True,
+    focal_gamma: float = 2.0
 ):
     import torch
     
@@ -440,27 +498,75 @@ def run_pipeline(
     print(f"  Train set: {len(data['train_labels'])} samples")
     print(f"  Test set:  {len(data['test_labels'])} samples")
     
+    use_sequence = seq_len > 1 or model_type in ["crnn", "sequence"]
+    if model_type == "crnn":
+        seq_len = max(seq_len, 5)
+    
     print(f"\n[4/6] Building {model_type.upper()} model...")
-    model = get_model(
-        model_type=model_type,
-        input_channels=1,
-        num_classes=num_classes,
-        hidden_dim=128,
-        dropout=0.3
-    )
+    if use_sequence:
+        print(f"  Using SEQUENCE mode with seq_len={seq_len} (Multi-Scale CNN + BiLSTM)")
+        model = SleepSequenceModel(
+            num_classes=num_classes,
+            hidden_dim=256,
+            dropout=0.3,
+            seq_len=seq_len,
+            predict_center_only=True
+        )
+    else:
+        model = get_model(
+            model_type=model_type,
+            input_channels=1,
+            num_classes=num_classes,
+            hidden_dim=128,
+            dropout=0.3
+        )
     
     param_count = sum(p.numel() for p in model.parameters())
     print(f"  Parameters: {param_count:,}")
     
     print(f"\n[5/6] Training for {epochs} epochs...")
-    train_loader, val_loader, feat_mean, feat_std = create_loaders(
-        data["train_features"], 
-        data["train_labels"],
-        batch_size=batch_size,
-        val_ratio=0.15,
-        aug_strength=aug_strength,
-        oversample_factor=oversample_factor
-    )
+    
+    if use_sequence:
+        from sleep_stage_classifier.augmentation import get_train_transform
+        train_transform = get_train_transform(aug_strength) if aug_strength != "none" else None
+        
+        val_ratio = 0.15
+        n_train = len(data["train_labels"])
+        indices = np.random.permutation(n_train)
+        val_size = int(n_train * val_ratio)
+        val_idx, train_idx = indices[:val_size], indices[val_size:]
+        
+        train_features = data["train_features"][train_idx]
+        train_labels = data["train_labels"][train_idx]
+        val_features = data["train_features"][val_idx]
+        val_labels = data["train_labels"][val_idx]
+        
+        feat_p5 = np.percentile(train_features, 5)
+        feat_p95 = np.percentile(train_features, 95)
+        feat_mean = (feat_p5 + feat_p95) / 2
+        feat_std = (feat_p95 - feat_p5) / 2 + 1e-8
+        
+        train_features = (train_features - feat_mean) / feat_std
+        val_features = (val_features - feat_mean) / feat_std
+        
+        train_loader, val_loader = create_sequence_loaders(
+            train_features, train_labels,
+            val_features, val_labels,
+            seq_len=seq_len,
+            batch_size=batch_size,
+            train_transform=train_transform,
+            num_workers=4
+        )
+        print(f"  Sequence length: {seq_len} epochs ({seq_len * 30}s context)")
+    else:
+        train_loader, val_loader, feat_mean, feat_std = create_loaders(
+            data["train_features"], 
+            data["train_labels"],
+            batch_size=batch_size,
+            val_ratio=0.15,
+            aug_strength=aug_strength,
+            oversample_factor=oversample_factor
+        )
     
     print(f"  Train batches: {len(train_loader)}")
     print(f"  Val batches: {len(val_loader)}")
@@ -470,9 +576,6 @@ def run_pipeline(
         batch_size=batch_size,
         device=device
     )
-    
-    use_focal = False
-    focal_gamma = 2.0
     
     if use_focal:
         class_weights = compute_class_weights(data["train_labels"])[:num_classes]
@@ -507,7 +610,15 @@ def run_pipeline(
         print(f"    {name}: {count} ({100*count/len(data['test_labels']):.1f}%)")
     
     test_features_norm = (data["test_features"] - feat_mean) / feat_std
-    metrics = evaluate_model(model, test_features_norm, data["test_labels"], device)
+    
+    if use_sequence:
+        metrics = evaluate_sequence_model(
+            model, test_features_norm, data["test_labels"], 
+            seq_len=seq_len, device=device, batch_size=batch_size
+        )
+        print(f"  (Evaluated {len(metrics['predictions'])} samples with seq_len={seq_len})")
+    else:
+        metrics = evaluate_model(model, test_features_norm, data["test_labels"], device)
     
     pred_counts = np.bincount(metrics["predictions"], minlength=num_classes)
     print(f"  Model predictions distribution:")
@@ -524,10 +635,11 @@ def run_pipeline(
     print(f"  Cohen's Kappa:   {metrics['kappa']:.4f}")
     
     print("\n  Classification Report:")
-    present_classes = np.unique(np.concatenate([data["test_labels"], metrics["predictions"]]))
+    eval_labels = metrics["labels"]
+    present_classes = np.unique(np.concatenate([eval_labels, metrics["predictions"]]))
     target_names = [stage_names.get(i, f"Class_{i}") for i in present_classes]
     print(classification_report(
-        data["test_labels"], 
+        eval_labels, 
         metrics["predictions"],
         labels=present_classes,
         target_names=target_names,
@@ -547,7 +659,7 @@ def run_pipeline(
         test_indices=data["test_indices"],
         train_indices=data["train_indices"],
         test_predictions=metrics["predictions"],
-        test_labels=data["test_labels"]
+        test_labels=eval_labels
     )
     print(f"  Data saved: ./output/evaluation_data.npz")
     
@@ -566,7 +678,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sleep Stage Classification Pipeline")
     parser.add_argument("--edf_dir", default=EDF_DIR)
     parser.add_argument("--rml_dir", default=RML_DIR)
-    parser.add_argument("--model", default="cnn", choices=["cnn", "crnn", "transformer", "deep_transformer"])
+    parser.add_argument("--model", default="cnn", choices=["cnn", "crnn", "transformer", "deep_transformer", "sequence"])
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--test_ratio", type=float, default=0.2, help="Test set ratio (default: 0.2 = 20%%)")
     parser.add_argument("--batch_size", type=int, default=16)
@@ -578,8 +690,11 @@ if __name__ == "__main__":
                         help="Oversample factor for minority classes (default: 1.0, try 1.5-2.0)")
     parser.add_argument("--focal", action="store_true", default=True,
                         help="Use Focal Loss (default: True)")
-    parser.add_argument("--focal_gamma", type=float, default=3.0,
-                        help="Focal Loss gamma parameter (default: 3.0)")
+    parser.add_argument("--no_focal", action="store_true", help="Disable Focal Loss")
+    parser.add_argument("--focal_gamma", type=float, default=2.0,
+                        help="Focal Loss gamma parameter (default: 2.0)")
+    parser.add_argument("--seq_len", type=int, default=1,
+                        help="Sequence length for temporal context (default: 1, use 5-11 for crnn)")
     args = parser.parse_args()
     
     run_pipeline(
@@ -591,5 +706,8 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         num_stages=args.stages,
         aug_strength=args.aug,
-        oversample_factor=args.oversample
+        oversample_factor=args.oversample,
+        seq_len=args.seq_len,
+        use_focal=not args.no_focal,
+        focal_gamma=args.focal_gamma
     )
