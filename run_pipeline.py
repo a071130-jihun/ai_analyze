@@ -712,7 +712,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sleep Stage Classification Pipeline")
     parser.add_argument("--edf_dir", default=EDF_DIR)
     parser.add_argument("--rml_dir", default=RML_DIR)
-    parser.add_argument("--model", default="cnn", choices=["cnn", "crnn", "transformer", "deep_transformer", "sequence"])
+    parser.add_argument("--model", default="cnn", choices=["cnn", "crnn", "transformer", "deep_transformer", "sequence", "deep_resnet", "deep_resnet_large"])
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--test_ratio", type=float, default=0.2, help="Test set ratio (default: 0.2 = 20%%)")
     parser.add_argument("--batch_size", type=int, default=16)

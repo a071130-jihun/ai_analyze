@@ -255,7 +255,7 @@ class DeepSleepTransformer(nn.Module):
 
 
 def get_model(model_type: str = "cnn", **kwargs) -> nn.Module:
-    from .sequence_model import SleepSequenceModel
+    from .sequence_model import SleepSequenceModel, DeepSleepResNet, DeepSleepResNetLarge
     
     models = {
         "cnn": SleepStageCNN,
@@ -263,6 +263,8 @@ def get_model(model_type: str = "cnn", **kwargs) -> nn.Module:
         "transformer": SleepStageTransformer,
         "deep_transformer": DeepSleepTransformer,
         "sequence": SleepSequenceModel,
+        "deep_resnet": DeepSleepResNet,
+        "deep_resnet_large": DeepSleepResNetLarge,
     }
     
     if model_type not in models:

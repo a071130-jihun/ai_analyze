@@ -280,3 +280,406 @@ def create_sequence_loaders(
     )
     
     return train_loader, val_loader
+
+
+# =============================================================================
+# Deep ResNet with Inception and SE-Block for 5090 x4 Optimization
+# Target: 2M ~ 5M parameters, stable training with 200+ subjects
+# =============================================================================
+
+class ResidualBlock(nn.Module):
+    """
+    Standard ResNet-style residual block with skip connection.
+    x = Conv(Conv(x)) + identity
+    """
+    def __init__(
+        self, 
+        in_channels: int, 
+        out_channels: int, 
+        stride: int = 1,
+        dropout: float = 0.0
+    ):
+        super().__init__()
+        
+        self.conv1 = nn.Conv2d(
+            in_channels, out_channels, kernel_size=3, 
+            stride=stride, padding=1, bias=False
+        )
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        
+        self.conv2 = nn.Conv2d(
+            out_channels, out_channels, kernel_size=3,
+            stride=1, padding=1, bias=False
+        )
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        
+        self.dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
+        
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+        else:
+            self.shortcut = nn.Identity()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = F.relu(out, inplace=True)
+        out = self.dropout(out)
+        
+        out = self.conv2(out)
+        out = self.bn2(out)
+        
+        out = out + self.shortcut(identity)
+        out = F.relu(out, inplace=True)
+        
+        return out
+
+
+class InceptionResidualBlock(nn.Module):
+    """
+    Inception-style multi-scale convolution with residual connection and SE attention.
+    Captures both high-frequency (fast tremors) and low-frequency (slow waves) patterns.
+    """
+    def __init__(
+        self, 
+        in_channels: int, 
+        out_channels: int,
+        stride: int = 1,
+        dropout: float = 0.1,
+        se_reduction: int = 16
+    ):
+        super().__init__()
+        
+        branch_ch = out_channels // 4
+        self.stride = stride
+        
+        self.branch1 = nn.Sequential(
+            nn.Conv2d(in_channels, branch_ch, kernel_size=1, stride=stride, bias=False),
+            nn.BatchNorm2d(branch_ch),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.branch3 = nn.Sequential(
+            nn.Conv2d(in_channels, branch_ch, kernel_size=1, bias=False),
+            nn.BatchNorm2d(branch_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(branch_ch, branch_ch, kernel_size=3, stride=stride, padding=1, bias=False),
+            nn.BatchNorm2d(branch_ch),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.branch5 = nn.Sequential(
+            nn.Conv2d(in_channels, branch_ch, kernel_size=1, bias=False),
+            nn.BatchNorm2d(branch_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(branch_ch, branch_ch, kernel_size=5, stride=stride, padding=2, bias=False),
+            nn.BatchNorm2d(branch_ch),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.branch7 = nn.Sequential(
+            nn.Conv2d(in_channels, branch_ch, kernel_size=1, bias=False),
+            nn.BatchNorm2d(branch_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(branch_ch, branch_ch, kernel_size=7, stride=stride, padding=3, bias=False),
+            nn.BatchNorm2d(branch_ch),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.fusion = nn.Sequential(
+            nn.Conv2d(branch_ch * 4, out_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(out_channels)
+        )
+        
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(out_channels, out_channels // se_reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(out_channels // se_reduction, out_channels, bias=False),
+            nn.Sigmoid()
+        )
+        
+        self.dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
+        
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+        else:
+            self.shortcut = nn.Identity()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        
+        b1 = self.branch1(x)
+        b3 = self.branch3(x)
+        b5 = self.branch5(x)
+        b7 = self.branch7(x)
+        
+        out = torch.cat([b1, b3, b5, b7], dim=1)
+        out = self.fusion(out)
+        
+        b, c, _, _ = out.size()
+        se_weight = self.se(out).view(b, c, 1, 1)
+        out = out * se_weight
+        
+        out = self.dropout(out)
+        
+        out = out + self.shortcut(identity)
+        out = F.relu(out, inplace=True)
+        
+        return out
+
+
+class DeepSleepResNet(nn.Module):
+    """
+    Deep ResNet with Inception and SE-Block.
+    
+    Architecture: Stem -> Stage1(64) -> Stage2(128) -> Stage3(256) -> Classifier
+    Target parameters: 2M ~ 5M
+    """
+    def __init__(
+        self,
+        input_channels: int = 1,
+        num_classes: int = 3,
+        base_channels: int = 64,
+        dropout: float = 0.3,
+        use_inception: bool = True,
+        **kwargs
+    ):
+        super().__init__()
+        
+        self.use_inception = use_inception
+        
+        self.stem = nn.Sequential(
+            nn.Conv2d(input_channels, base_channels, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.BatchNorm2d(base_channels),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        )
+        
+        self.stage1 = self._make_stage(
+            base_channels, base_channels, 
+            num_blocks=2, stride=1, dropout=dropout * 0.3
+        )
+        
+        self.stage2 = self._make_stage(
+            base_channels, base_channels * 2,
+            num_blocks=2, stride=2, dropout=dropout * 0.5
+        )
+        
+        self.stage3 = self._make_stage(
+            base_channels * 2, base_channels * 4,
+            num_blocks=3, stride=2, dropout=dropout * 0.7
+        )
+        
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+        
+        final_channels = base_channels * 4
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(final_channels, 512),
+            nn.LayerNorm(512),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
+            nn.GELU(),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(256, num_classes)
+        )
+        
+        self._init_weights()
+    
+    def _make_stage(
+        self, 
+        in_channels: int, 
+        out_channels: int, 
+        num_blocks: int,
+        stride: int,
+        dropout: float
+    ) -> nn.Sequential:
+        """Create a stage with multiple residual blocks."""
+        layers = []
+        
+        if self.use_inception:
+            layers.append(InceptionResidualBlock(
+                in_channels, out_channels, stride=stride, dropout=dropout
+            ))
+        else:
+            layers.append(ResidualBlock(
+                in_channels, out_channels, stride=stride, dropout=dropout
+            ))
+        
+        for _ in range(1, num_blocks):
+            layers.append(ResidualBlock(
+                out_channels, out_channels, stride=1, dropout=dropout
+            ))
+        
+        return nn.Sequential(*layers)
+    
+    def _init_weights(self):
+        """Initialize weights using Kaiming initialization."""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 5:
+            batch_size, seq_len, c, h, w = x.shape
+            x = x.view(batch_size * seq_len, c, h, w)
+            features = self._extract_features(x)
+            features = features.view(batch_size, seq_len, -1)
+            center_idx = seq_len // 2
+            features = features[:, center_idx, :]
+            return self.classifier(features)
+        
+        features = self._extract_features(x)
+        return self.classifier(features)
+    
+    def _extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.stage3(x)
+        x = self.global_pool(x)
+        return x.view(x.size(0), -1)
+
+
+class DeepSleepResNetLarge(nn.Module):
+    """
+    Large variant with 4 stages (64->128->256->512) for RTX 5090 x4.
+    Architecture: Stem -> Stage1(64) -> Stage2(128) -> Stage3(256) -> Stage4(512) -> Classifier(1024->512)
+    Target parameters: 10M+
+    """
+    def __init__(
+        self,
+        input_channels: int = 1,
+        num_classes: int = 3,
+        base_channels: int = 64,
+        dropout: float = 0.3,
+        use_inception: bool = True,
+        **kwargs
+    ):
+        super().__init__()
+        
+        self.use_inception = use_inception
+        
+        self.stem = nn.Sequential(
+            nn.Conv2d(input_channels, base_channels, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.BatchNorm2d(base_channels),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        )
+        
+        self.stage1 = self._make_stage(
+            base_channels, base_channels, 
+            num_blocks=2, stride=1, dropout=dropout * 0.3
+        )
+        
+        self.stage2 = self._make_stage(
+            base_channels, base_channels * 2,
+            num_blocks=2, stride=2, dropout=dropout * 0.5
+        )
+        
+        self.stage3 = self._make_stage(
+            base_channels * 2, base_channels * 4,
+            num_blocks=3, stride=2, dropout=dropout * 0.7
+        )
+        
+        self.stage4 = self._make_stage(
+            base_channels * 4, base_channels * 8,
+            num_blocks=2, stride=2, dropout=dropout
+        )
+        
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+        
+        final_channels = base_channels * 8
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(final_channels, 1024),
+            nn.LayerNorm(1024),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(1024, 512),
+            nn.LayerNorm(512),
+            nn.GELU(),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(512, num_classes)
+        )
+        
+        self._init_weights()
+    
+    def _make_stage(
+        self, 
+        in_channels: int, 
+        out_channels: int, 
+        num_blocks: int,
+        stride: int,
+        dropout: float
+    ) -> nn.Sequential:
+        layers = []
+        
+        if self.use_inception:
+            layers.append(InceptionResidualBlock(
+                in_channels, out_channels, stride=stride, dropout=dropout
+            ))
+        else:
+            layers.append(ResidualBlock(
+                in_channels, out_channels, stride=stride, dropout=dropout
+            ))
+        
+        for _ in range(1, num_blocks):
+            layers.append(ResidualBlock(
+                out_channels, out_channels, stride=1, dropout=dropout
+            ))
+        
+        return nn.Sequential(*layers)
+    
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 5:
+            batch_size, seq_len, c, h, w = x.shape
+            x = x.view(batch_size * seq_len, c, h, w)
+            features = self._extract_features(x)
+            features = features.view(batch_size, seq_len, -1)
+            center_idx = seq_len // 2
+            features = features[:, center_idx, :]
+            return self.classifier(features)
+        
+        features = self._extract_features(x)
+        return self.classifier(features)
+    
+    def _extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.stage3(x)
+        x = self.stage4(x)
+        x = self.global_pool(x)
+        return x.view(x.size(0), -1)
