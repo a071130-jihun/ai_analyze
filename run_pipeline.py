@@ -201,6 +201,9 @@ def create_loaders(
         class_weights = 1.0 / (class_counts + 1e-8)
         class_weights = class_weights / class_weights.min()
         
+        class_weights = np.sqrt(class_weights)
+        class_weights = np.clip(class_weights, 1.0, 3.0)
+        
         if oversample_factor > 1.0:
             class_weights = class_weights ** oversample_factor
         
@@ -222,8 +225,8 @@ def create_loaders(
             num_workers=4, pin_memory=True, persistent_workers=True
         )
         
-        print(f"  Augmentation: {aug_strength}, Balanced sampling: Train only (Val keeps real distribution)")
-        print(f"  Train class weights: {dict(enumerate(class_weights[:len(class_counts)].round(2)))}")
+        print(f"  Augmentation: {aug_strength}, Balanced sampling: SOFT (sqrt + clip 3.0)")
+        print(f"  Sampling weights: {dict(enumerate(class_weights[:len(class_counts)].round(2)))}")
     else:
         train_loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True, 
@@ -460,7 +463,8 @@ def run_pipeline(
     print(f"  Train batches: {len(train_loader)}")
     print(f"  Val batches: {len(val_loader)}")
     
-    class_weights = compute_class_weights(data["train_labels"])[:num_classes]
+    print(f"\n  ⚠️  Balanced Sampling이 활성화되어 있으므로 Loss class_weights는 비활성화됩니다.")
+    print(f"      (이중 균형화 방지 - 소수 클래스 과대예측 문제 해결)")
     
     train_config = TrainConfig(
         num_epochs=epochs,
@@ -471,7 +475,7 @@ def run_pipeline(
     trainer = Trainer(
         model=model,
         train_config=train_config,
-        class_weights=class_weights
+        class_weights=None
     )
     
     print()
