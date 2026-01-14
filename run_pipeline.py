@@ -400,7 +400,8 @@ def run_pipeline(
     consistency_weight: float = 1.0,
     multi_gpu: bool = True,
     num_workers: int = None,
-    num_threads: int = None
+    num_threads: int = None,
+    learning_rate: float = None
 ):
     import torch
     
@@ -598,7 +599,8 @@ def run_pipeline(
     train_config = TrainConfig(
         num_epochs=epochs,
         batch_size=batch_size,
-        device=device
+        device=device,
+        learning_rate=learning_rate if learning_rate is not None else TrainConfig.learning_rate
     )
     
     if use_focal:
@@ -739,6 +741,8 @@ if __name__ == "__main__":
                         help="DataLoader worker processes (default: min(32, cpu_count))")
     parser.add_argument("--num_threads", type=int, default=None,
                         help="PyTorch intraop CPU threads (default: min(32, cpu_count))")
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Learning rate override (default: config value)")
     args = parser.parse_args()
     
     run_pipeline(
@@ -758,5 +762,6 @@ if __name__ == "__main__":
         consistency_weight=args.consistency_weight,
         multi_gpu=not args.single_gpu,
         num_workers=args.num_workers,
-        num_threads=args.num_threads
+        num_threads=args.num_threads,
+        learning_rate=args.lr
     )
