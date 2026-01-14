@@ -21,6 +21,18 @@ RML_DIR = "./APNEA_RML"
 STAGE_NAMES = {0: "Wake", 1: "N1", 2: "N2", 3: "N3", 4: "REM"}
 
 
+def find_subject_ids_from_cache(cache_dir: str):
+    """캐시 폴더에서 subject ID 추출"""
+    import glob
+    cache_files = glob.glob(os.path.join(cache_dir, "*_features.pkl"))
+    subject_ids = []
+    for f in cache_files:
+        basename = os.path.basename(f)
+        subject_id = basename.replace("_features.pkl", "")
+        subject_ids.append(subject_id)
+    return sorted(subject_ids)
+
+
 def remap_labels_continuous(labels: np.ndarray):
     unique_labels = np.unique(labels)
     label_map = {old: new for new, old in enumerate(unique_labels)}
@@ -157,14 +169,23 @@ def run_pipeline(
     print("=" * 70)
     
     print("\n[1/6] Loading data...")
+    cache_dir = "./cache"
     processor = PSGDataProcessor(
         audio_config=AudioConfig(),
         use_librosa=False,
-        cache_dir="./cache"
+        cache_dir=cache_dir
     )
     
-    subject_ids = find_subject_ids(edf_dir)
-    print(f"  Found {len(subject_ids)} subject(s)")
+    if os.path.exists(edf_dir):
+        subject_ids = find_subject_ids(edf_dir)
+        print(f"  Found {len(subject_ids)} subject(s) from EDF directory")
+    else:
+        subject_ids = find_subject_ids_from_cache(cache_dir)
+        print(f"  Found {len(subject_ids)} subject(s) from cache (EDF dir not found)")
+    
+    if len(subject_ids) == 0:
+        print("  ERROR: No subjects found. Need either EDF files or cache.")
+        return
     
     if len(subject_ids) == 1:
         features, labels = processor.process_subject(
@@ -239,6 +260,11 @@ def run_pipeline(
     print()
     history = trainer.train(train_loader, val_loader, num_epochs=epochs)
     
+    os.makedirs("./output", exist_ok=True)
+    model_path = f"./output/sleep_stage_{model_type}.pt"
+    trainer.save_model(model_path)
+    print(f"\n  Model saved: {model_path}")
+    
     print(f"\n[6/6] Evaluating on TEST SET...")
     metrics = evaluate_model(model, data["test_features"], data["test_labels"], device)
     
@@ -252,7 +278,7 @@ def run_pipeline(
     
     print("\n  Classification Report:")
     present_classes = np.unique(np.concatenate([data["test_labels"], metrics["predictions"]]))
-    target_names = [STAGE_NAMES[i] for i in present_classes]
+    target_names = [STAGE_NAMES.get(i, f"Class_{i}") for i in present_classes]
     print(classification_report(
         data["test_labels"], 
         metrics["predictions"],
