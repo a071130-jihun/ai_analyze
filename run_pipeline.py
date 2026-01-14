@@ -394,7 +394,9 @@ def run_pipeline(
     oversample_factor: float = 1.0,
     seq_len: int = 1,
     use_focal: bool = True,
-    focal_gamma: float = 2.0
+    focal_gamma: float = 2.0,
+    use_consistency: bool = True,
+    consistency_weight: float = 1.0
 ):
     import torch
     
@@ -590,12 +592,17 @@ def run_pipeline(
         class_weights = None
         print(f"\n  Using CrossEntropyLoss (no class weights - balanced sampling active)")
     
+    if use_consistency:
+        print(f"  Consistency Training: ENABLED (weight={consistency_weight})")
+    
     trainer = Trainer(
         model=model,
         train_config=train_config,
         class_weights=class_weights,
         use_focal_loss=use_focal,
-        focal_gamma=focal_gamma
+        focal_gamma=focal_gamma,
+        use_consistency=use_consistency,
+        consistency_weight=consistency_weight
     )
     
     print()
@@ -700,6 +707,11 @@ if __name__ == "__main__":
                         help="Focal Loss gamma parameter (default: 2.0)")
     parser.add_argument("--seq_len", type=int, default=1,
                         help="Sequence length for temporal context (default: 1, use 5-11 for crnn)")
+    parser.add_argument("--consistency", action="store_true", default=True,
+                        help="Use Consistency Training (default: True)")
+    parser.add_argument("--no_consistency", action="store_true", help="Disable Consistency Training")
+    parser.add_argument("--consistency_weight", type=float, default=1.0,
+                        help="Consistency loss weight (default: 1.0)")
     args = parser.parse_args()
     
     run_pipeline(
@@ -714,5 +726,7 @@ if __name__ == "__main__":
         oversample_factor=args.oversample,
         seq_len=args.seq_len,
         use_focal=not args.no_focal,
-        focal_gamma=args.focal_gamma
+        focal_gamma=args.focal_gamma,
+        use_consistency=not args.no_consistency,
+        consistency_weight=args.consistency_weight
     )

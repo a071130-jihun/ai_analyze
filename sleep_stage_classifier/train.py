@@ -53,6 +53,69 @@ class FocalLoss(nn.Module):
         return focal_loss
 
 
+class JSDConsistencyLoss(nn.Module):
+    def __init__(self, num_augments: int = 2):
+        super().__init__()
+        self.num_augments = num_augments
+    
+    def forward(self, logits_list):
+        probs_list = [torch.softmax(logits, dim=1) for logits in logits_list]
+        
+        mean_probs = torch.stack(probs_list).mean(dim=0)
+        
+        jsd = 0.0
+        for probs in probs_list:
+            kl = torch.sum(probs * (torch.log(probs + 1e-8) - torch.log(mean_probs + 1e-8)), dim=1)
+            jsd += kl
+        jsd = jsd / len(probs_list)
+        
+        return jsd.mean()
+
+
+def create_augmented_batch(batch_x, augment_fn1, augment_fn2=None):
+    aug1 = augment_fn1(batch_x)
+    if augment_fn2 is not None:
+        aug2 = augment_fn2(batch_x)
+    else:
+        aug2 = augment_fn1(batch_x)
+    return aug1, aug2
+
+
+class ConsistencyAugmentor:
+    def __init__(self, noise_scale=0.1, time_shift_max=5, freq_mask_max=10):
+        self.noise_scale = noise_scale
+        self.time_shift_max = time_shift_max
+        self.freq_mask_max = freq_mask_max
+    
+    def add_noise(self, x):
+        noise = torch.randn_like(x) * self.noise_scale
+        return x + noise
+    
+    def time_shift(self, x):
+        shift = np.random.randint(-self.time_shift_max, self.time_shift_max + 1)
+        if shift == 0:
+            return x.clone()
+        return torch.roll(x, shifts=shift, dims=-1)
+    
+    def freq_mask(self, x):
+        num_freq = x.size(-2)
+        f = np.random.randint(0, self.freq_mask_max)
+        f0 = np.random.randint(0, num_freq - f)
+        x_masked = x.clone()
+        x_masked[..., f0:f0+f, :] = 0
+        return x_masked
+    
+    def augment_v1(self, x):
+        x = self.add_noise(x)
+        x = self.time_shift(x)
+        return x
+    
+    def augment_v2(self, x):
+        x = self.add_noise(x)
+        x = self.freq_mask(x)
+        return x
+
+
 class EarlyStopping:
     def __init__(self, patience: int = 10, min_delta: float = 0.0):
         self.patience = patience
@@ -83,7 +146,9 @@ class Trainer:
         use_amp: bool = True,
         use_compile: bool = True,
         use_focal_loss: bool = False,
-        focal_gamma: float = 2.0
+        focal_gamma: float = 2.0,
+        use_consistency: bool = False,
+        consistency_weight: float = 1.0
     ):
         self.config = train_config or TrainConfig()
         
@@ -137,13 +202,21 @@ class Trainer:
         if self.config.save_best_model:
             os.makedirs(self.config.checkpoint_dir, exist_ok=True)
         
+        self.use_consistency = use_consistency
+        self.consistency_weight = consistency_weight
+        if use_consistency:
+            self.jsd_loss = JSDConsistencyLoss()
+            self.augmentor = ConsistencyAugmentor(noise_scale=0.15, time_shift_max=5, freq_mask_max=15)
+            print(f"  Consistency Training enabled (weight={consistency_weight})")
+        
         self.history = {
             "train_loss": [],
             "val_loss": [],
             "train_acc": [],
             "val_acc": [],
             "val_f1": [],
-            "learning_rate": []
+            "learning_rate": [],
+            "consistency_loss": []
         }
     
     def _create_scheduler(self, num_epochs: int, steps_per_epoch: int = None):
@@ -229,6 +302,7 @@ class Trainer:
         
         self.model.train()
         total_loss = 0.0
+        total_consistency_loss = 0.0
         all_preds = []
         all_labels = []
         
@@ -239,13 +313,26 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             
             with torch.amp.autocast('cuda', enabled=self.use_amp):
-                if use_mixup and np.random.random() < 0.5:
-                    mixed_x, y_a, y_b, lam = mixup_data(batch_x, batch_y, mixup_alpha)
-                    outputs = self.model(mixed_x)
-                    loss = mixup_criterion(self.criterion, outputs, y_a, y_b, lam)
+                outputs = self.model(batch_x)
+                ce_loss = self.criterion(outputs, batch_y)
+                
+                if self.use_consistency:
+                    aug_x1 = self.augmentor.augment_v1(batch_x)
+                    aug_x2 = self.augmentor.augment_v2(batch_x)
+                    
+                    outputs_aug1 = self.model(aug_x1)
+                    outputs_aug2 = self.model(aug_x2)
+                    
+                    consistency_loss = self.jsd_loss([outputs, outputs_aug1, outputs_aug2])
+                    loss = ce_loss + self.consistency_weight * consistency_loss
+                    total_consistency_loss += consistency_loss.item()
                 else:
-                    outputs = self.model(batch_x)
-                    loss = self.criterion(outputs, batch_y)
+                    if use_mixup and np.random.random() < 0.5:
+                        mixed_x, y_a, y_b, lam = mixup_data(batch_x, batch_y, mixup_alpha)
+                        outputs = self.model(mixed_x)
+                        loss = mixup_criterion(self.criterion, outputs, y_a, y_b, lam)
+                    else:
+                        loss = ce_loss
             
             if self.use_amp:
                 self.scaler.scale(loss).backward()
@@ -265,6 +352,9 @@ class Trainer:
         
         avg_loss = total_loss / len(train_loader)
         accuracy = accuracy_score(all_labels, all_preds)
+        
+        if self.use_consistency:
+            self.history["consistency_loss"].append(total_consistency_loss / len(train_loader))
         
         return avg_loss, accuracy
     
@@ -405,7 +495,7 @@ class Trainer:
         self.history = checkpoint.get("history", self.history)
 
 
-def compute_class_weights(labels: np.ndarray, power: float = 0.5, max_weight: float = 6.0) -> np.ndarray:
+def compute_class_weights(labels: np.ndarray, power: float = 0.4, max_weight: float = 3.5) -> np.ndarray:
     unique, counts = np.unique(labels, return_counts=True)
     total = len(labels)
     
