@@ -93,7 +93,7 @@ def create_loaders(features, labels, batch_size=16, val_ratio=0.15, use_augmenta
     
     if use_balanced_sampling:
         class_counts = np.bincount(train_labels)
-        class_weights = 1.0 / class_counts
+        class_weights = 1.0 / np.sqrt(class_counts)
         sample_weights = class_weights[train_labels]
         sampler = WeightedRandomSampler(
             weights=sample_weights,
