@@ -405,7 +405,7 @@ class Trainer:
         self.history = checkpoint.get("history", self.history)
 
 
-def compute_class_weights(labels: np.ndarray, power: float = 0.5, max_weight: float = 5.0) -> np.ndarray:
+def compute_class_weights(labels: np.ndarray, power: float = 0.3, max_weight: float = 2.5) -> np.ndarray:
     unique, counts = np.unique(labels, return_counts=True)
     total = len(labels)
     

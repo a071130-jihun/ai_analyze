@@ -365,7 +365,9 @@ def run_pipeline(
         print("  ERROR: No subjects found. Need either EDF files or cache.")
         return
     
-    use_subject_split = len(subject_ids) > 1
+    # Subject-level split requires at least 5 subjects to avoid catastrophic distribution shift
+    # With 2 subjects, train=1, test=1 causes completely different distributions
+    use_subject_split = len(subject_ids) >= 5
     
     if len(subject_ids) == 1:
         features, labels = processor.process_subject(
@@ -469,8 +471,8 @@ def run_pipeline(
         device=device
     )
     
-    use_focal = True
-    focal_gamma = 3.0
+    use_focal = False
+    focal_gamma = 2.0
     
     if use_focal:
         class_weights = compute_class_weights(data["train_labels"])[:num_classes]
