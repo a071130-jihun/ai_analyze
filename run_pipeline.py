@@ -73,7 +73,16 @@ def split_data(features, labels, test_ratio=0.2, random_seed=42):
     }
 
 
-def create_loaders(features, labels, batch_size=16, val_ratio=0.15, use_augmentation=True, use_balanced_sampling=True):
+def create_loaders(
+    features, 
+    labels, 
+    batch_size=16, 
+    val_ratio=0.15, 
+    use_augmentation=True, 
+    use_balanced_sampling=True,
+    aug_strength="medium",
+    oversample_factor=2.0
+):
     import torch
     from torch.utils.data import DataLoader, WeightedRandomSampler
     from sleep_stage_classifier.augmentation import get_train_transform
@@ -87,20 +96,26 @@ def create_loaders(features, labels, batch_size=16, val_ratio=0.15, use_augmenta
     
     train_labels = labels[train_idx]
     
-    train_transform = get_train_transform() if use_augmentation else None
+    train_transform = get_train_transform(strength=aug_strength) if use_augmentation else None
     train_dataset = SleepStageDataset(features[train_idx], train_labels, transform=train_transform)
     val_dataset = SleepStageDataset(features[val_idx], labels[val_idx])
     
     if use_balanced_sampling:
         class_counts = np.bincount(train_labels)
-        class_weights = 1.0 / np.sqrt(class_counts)
+        max_count = class_counts.max()
+        class_weights = (max_count / class_counts) ** oversample_factor
         sample_weights = class_weights[train_labels]
+        
+        num_samples = int(len(train_labels) * (1 + oversample_factor * 0.5))
+        
         sampler = WeightedRandomSampler(
             weights=sample_weights,
-            num_samples=len(train_labels),
+            num_samples=num_samples,
             replacement=True
         )
         train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, num_workers=0)
+        print(f"  Augmentation: {aug_strength}, Oversample factor: {oversample_factor}")
+        print(f"  Effective samples per epoch: {num_samples}")
     else:
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
     
@@ -196,7 +211,9 @@ def run_pipeline(
     epochs: int = 30,
     test_ratio: float = 0.2,
     batch_size: int = 16,
-    num_stages: int = 5
+    num_stages: int = 5,
+    aug_strength: str = "medium",
+    oversample_factor: float = 1.0
 ):
     import torch
     
@@ -285,7 +302,9 @@ def run_pipeline(
         data["train_features"], 
         data["train_labels"],
         batch_size=batch_size,
-        val_ratio=0.15
+        val_ratio=0.15,
+        aug_strength=aug_strength,
+        oversample_factor=oversample_factor
     )
     
     print(f"  Train batches: {len(train_loader)}")
@@ -373,6 +392,10 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--stages", type=int, default=5, choices=[3, 5],
                         help="Number of sleep stages: 3 (Wake/NREM/REM) or 5 (Wake/N1/N2/N3/REM)")
+    parser.add_argument("--aug", default="medium", choices=["light", "medium", "strong", "aggressive"],
+                        help="Augmentation strength (default: medium)")
+    parser.add_argument("--oversample", type=float, default=1.0,
+                        help="Oversample factor for minority classes (default: 1.0, try 1.5-2.0)")
     args = parser.parse_args()
     
     run_pipeline(
@@ -382,5 +405,7 @@ if __name__ == "__main__":
         epochs=args.epochs,
         test_ratio=args.test_ratio,
         batch_size=args.batch_size,
-        num_stages=args.stages
+        num_stages=args.stages,
+        aug_strength=args.aug,
+        oversample_factor=args.oversample
     )

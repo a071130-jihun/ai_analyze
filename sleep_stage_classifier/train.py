@@ -1,12 +1,18 @@
 from typing import Dict, Tuple, Optional
 from pathlib import Path
 import numpy as np
+import os
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import (
+    CosineAnnealingLR,
+    ReduceLROnPlateau,
+    OneCycleLR,
+    LambdaLR
+)
 
 from sklearn.metrics import (
     accuracy_score, 
@@ -16,6 +22,16 @@ from sklearn.metrics import (
 )
 
 from .config import TrainConfig, SLEEP_STAGE_NAMES
+
+
+def get_warmup_cosine_scheduler(optimizer, warmup_epochs: int, total_epochs: int, min_lr: float, base_lr: float):
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            return (epoch + 1) / warmup_epochs
+        progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
+        cosine_decay = 0.5 * (1 + np.cos(np.pi * progress))
+        return max(min_lr / base_lr, cosine_decay)
+    return LambdaLR(optimizer, lr_lambda)
 
 
 class FocalLoss(nn.Module):
@@ -88,13 +104,98 @@ class Trainer:
         self.scheduler = None
         self.early_stopping = EarlyStopping(patience=self.config.early_stopping_patience)
         
+        self.best_val_metric = -float('inf') if self.config.best_model_metric != "loss" else float('inf')
+        self.best_model_path = None
+        
+        if self.config.save_best_model:
+            os.makedirs(self.config.checkpoint_dir, exist_ok=True)
+        
         self.history = {
             "train_loss": [],
             "val_loss": [],
             "train_acc": [],
             "val_acc": [],
-            "val_f1": []
+            "val_f1": [],
+            "learning_rate": []
         }
+    
+    def _create_scheduler(self, num_epochs: int, steps_per_epoch: int = None):
+        scheduler_type = self.config.scheduler_type.lower()
+        
+        if scheduler_type == "cosine":
+            return CosineAnnealingLR(
+                self.optimizer,
+                T_max=num_epochs,
+                eta_min=self.config.min_lr
+            )
+        elif scheduler_type == "plateau":
+            return ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',
+                factor=self.config.plateau_factor,
+                patience=self.config.plateau_patience,
+                min_lr=self.config.min_lr,
+                verbose=True
+            )
+        elif scheduler_type == "onecycle":
+            if steps_per_epoch is None:
+                raise ValueError("steps_per_epoch required for OneCycleLR")
+            return OneCycleLR(
+                self.optimizer,
+                max_lr=self.config.learning_rate * 10,
+                epochs=num_epochs,
+                steps_per_epoch=steps_per_epoch,
+                pct_start=0.3,
+                anneal_strategy='cos'
+            )
+        elif scheduler_type == "warmup_cosine":
+            return get_warmup_cosine_scheduler(
+                self.optimizer,
+                warmup_epochs=self.config.warmup_epochs,
+                total_epochs=num_epochs,
+                min_lr=self.config.min_lr,
+                base_lr=self.config.learning_rate
+            )
+        else:
+            return CosineAnnealingLR(
+                self.optimizer,
+                T_max=num_epochs,
+                eta_min=self.config.min_lr
+            )
+    
+    def _get_current_lr(self) -> float:
+        return self.optimizer.param_groups[0]['lr']
+    
+    def _is_better(self, current_metric: float) -> bool:
+        metric_name = self.config.best_model_metric
+        if metric_name == "loss":
+            return current_metric < self.best_val_metric
+        else:
+            return current_metric > self.best_val_metric
+    
+    def _save_best_model(self, epoch: int, metric_value: float):
+        if not self.config.save_best_model:
+            return
+        
+        if self.best_model_path and os.path.exists(self.best_model_path):
+            os.remove(self.best_model_path)
+        
+        self.best_model_path = os.path.join(
+            self.config.checkpoint_dir,
+            f"best_model_epoch{epoch+1}_{self.config.best_model_metric}{metric_value:.4f}.pt"
+        )
+        
+        torch.save({
+            "epoch": epoch,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "metric_name": self.config.best_model_metric,
+            "metric_value": metric_value,
+            "history": self.history,
+            "config": self.config
+        }, self.best_model_path)
+        
+        print(f"  ★ Best model saved: {self.best_model_path}")
     
     def train_epoch(self, train_loader: DataLoader, use_mixup: bool = True, mixup_alpha: float = 0.2) -> Tuple[float, float]:
         from .augmentation import mixup_data, mixup_criterion
@@ -171,34 +272,52 @@ class Trainer:
     ) -> Dict:
         num_epochs = num_epochs or self.config.num_epochs
         
-        self.scheduler = CosineAnnealingLR(
-            self.optimizer, 
-            T_max=num_epochs,
-            eta_min=self.config.learning_rate * 0.01
+        self.scheduler = self._create_scheduler(
+            num_epochs=num_epochs,
+            steps_per_epoch=len(train_loader)
         )
         
-        best_val_f1 = 0.0
+        is_plateau = self.config.scheduler_type.lower() == "plateau"
+        is_onecycle = self.config.scheduler_type.lower() == "onecycle"
+        
         best_model_state = None
         
+        print(f"  Scheduler: {self.config.scheduler_type}")
+        print(f"  Best model metric: {self.config.best_model_metric}")
+        
         for epoch in range(num_epochs):
+            current_lr = self._get_current_lr()
+            
             train_loss, train_acc = self.train_epoch(train_loader)
             val_metrics = self.evaluate(val_loader)
             
-            self.scheduler.step()
+            if is_plateau:
+                self.scheduler.step(val_metrics["loss"])
+            elif not is_onecycle:
+                self.scheduler.step()
             
             self.history["train_loss"].append(train_loss)
             self.history["train_acc"].append(train_acc)
             self.history["val_loss"].append(val_metrics["loss"])
             self.history["val_acc"].append(val_metrics["accuracy"])
             self.history["val_f1"].append(val_metrics["f1"])
+            self.history["learning_rate"].append(current_lr)
             
-            print(f"Epoch {epoch+1}/{num_epochs}")
+            print(f"Epoch {epoch+1}/{num_epochs} [LR: {current_lr:.2e}]")
             print(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
             print(f"  Val Loss: {val_metrics['loss']:.4f}, Val Acc: {val_metrics['accuracy']:.4f}, Val F1: {val_metrics['f1']:.4f}")
             
-            if val_metrics["f1"] > best_val_f1:
-                best_val_f1 = val_metrics["f1"]
+            metric_map = {
+                "f1": val_metrics["f1"],
+                "loss": val_metrics["loss"],
+                "accuracy": val_metrics["accuracy"]
+            }
+            current_metric = metric_map.get(self.config.best_model_metric, val_metrics["f1"])
+            
+            if self._is_better(current_metric):
+                self.best_val_metric = current_metric
                 best_model_state = self.model.state_dict().copy()
+                self._save_best_model(epoch, current_metric)
             
             if self.early_stopping(val_metrics["loss"]):
                 print(f"Early stopping at epoch {epoch+1}")
@@ -206,6 +325,7 @@ class Trainer:
         
         if best_model_state:
             self.model.load_state_dict(best_model_state)
+            print(f"\n  Loaded best model (best {self.config.best_model_metric}: {self.best_val_metric:.4f})")
         
         return self.history
     

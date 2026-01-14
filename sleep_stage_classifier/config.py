@@ -35,6 +35,18 @@ class TrainConfig:
     device: str = "cuda"
     label_smoothing: float = 0.1
     
+    # Scheduler settings
+    scheduler_type: str = "cosine"  # "cosine", "plateau", "onecycle", "warmup_cosine"
+    warmup_epochs: int = 5
+    min_lr: float = 1e-6
+    plateau_patience: int = 5
+    plateau_factor: float = 0.5
+    
+    # Best model settings
+    save_best_model: bool = True
+    best_model_metric: str = "f1"  # "f1", "loss", "accuracy"
+    checkpoint_dir: str = "./output/checkpoints"
+    
 
 @dataclass
 class DataConfig:
