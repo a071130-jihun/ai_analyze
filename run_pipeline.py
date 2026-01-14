@@ -396,7 +396,8 @@ def run_pipeline(
     use_focal: bool = True,
     focal_gamma: float = 2.0,
     use_consistency: bool = True,
-    consistency_weight: float = 1.0
+    consistency_weight: float = 1.0,
+    multi_gpu: bool = True
 ):
     import torch
     
@@ -602,7 +603,8 @@ def run_pipeline(
         use_focal_loss=use_focal,
         focal_gamma=focal_gamma,
         use_consistency=use_consistency,
-        consistency_weight=consistency_weight
+        consistency_weight=consistency_weight,
+        multi_gpu=multi_gpu
     )
     
     print()
@@ -712,6 +714,9 @@ if __name__ == "__main__":
     parser.add_argument("--no_consistency", action="store_true", help="Disable Consistency Training")
     parser.add_argument("--consistency_weight", type=float, default=1.0,
                         help="Consistency loss weight (default: 1.0)")
+    parser.add_argument("--multi_gpu", action="store_true", default=True,
+                        help="Use multiple GPUs if available (default: True)")
+    parser.add_argument("--single_gpu", action="store_true", help="Force single GPU")
     args = parser.parse_args()
     
     run_pipeline(
@@ -728,5 +733,6 @@ if __name__ == "__main__":
         use_focal=not args.no_focal,
         focal_gamma=args.focal_gamma,
         use_consistency=not args.no_consistency,
-        consistency_weight=args.consistency_weight
+        consistency_weight=args.consistency_weight,
+        multi_gpu=not args.single_gpu
     )

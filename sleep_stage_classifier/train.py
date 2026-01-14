@@ -148,13 +148,17 @@ class Trainer:
         use_focal_loss: bool = False,
         focal_gamma: float = 2.0,
         use_consistency: bool = False,
-        consistency_weight: float = 1.0
+        consistency_weight: float = 1.0,
+        multi_gpu: bool = True
     ):
         self.config = train_config or TrainConfig()
         
         self.device = torch.device(
             self.config.device if torch.cuda.is_available() else "cpu"
         )
+        
+        self.num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        self.multi_gpu = multi_gpu and self.num_gpus > 1
         
         if torch.cuda.is_available():
             torch.backends.cudnn.benchmark = True
@@ -163,10 +167,14 @@ class Trainer:
         
         self.model = model.to(self.device)
         
+        if self.multi_gpu:
+            self.model = nn.DataParallel(self.model)
+            print(f"  Multi-GPU enabled: {self.num_gpus} GPUs")
+        
         self.use_amp = use_amp and torch.cuda.is_available()
         self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
         
-        if use_compile and hasattr(torch, 'compile'):
+        if use_compile and hasattr(torch, 'compile') and not self.multi_gpu:
             try:
                 self.model = torch.compile(self.model, mode='reduce-overhead')
                 print("  torch.compile() enabled")
@@ -481,16 +489,31 @@ class Trainer:
         }
     
     def save_model(self, path: str):
+        model_to_save = self.model.module if self.multi_gpu else self.model
+        if hasattr(model_to_save, '_orig_mod'):
+            model_to_save = model_to_save._orig_mod
+        
         torch.save({
-            "model_state_dict": self.model.state_dict(),
+            "model_state_dict": model_to_save.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "history": self.history,
             "config": self.config
         }, path)
     
     def load_model(self, path: str):
-        checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint["model_state_dict"])
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        state_dict = checkpoint["model_state_dict"]
+        
+        if any(k.startswith("module.") for k in state_dict.keys()):
+            state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+            state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+        
+        model_to_load = self.model.module if self.multi_gpu else self.model
+        if hasattr(model_to_load, '_orig_mod'):
+            model_to_load = model_to_load._orig_mod
+        
+        model_to_load.load_state_dict(state_dict)
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.history = checkpoint.get("history", self.history)
 
