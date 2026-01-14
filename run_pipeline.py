@@ -295,23 +295,34 @@ def run_pipeline(
     
     print("\n[2/6] Preprocessing labels...")
     unique_orig = np.unique(labels)
-    print(f"  Original labels: {list(unique_orig)}")
+    print(f"  Original labels (raw): {list(unique_orig)}")
+    print(f"  Original distribution:")
+    for lbl in unique_orig:
+        count = np.sum(labels == lbl)
+        print(f"    Label {lbl}: {count} ({100*count/len(labels):.1f}%)")
     
     if num_stages == 3:
-        print(f"  Converting to 3-stage: Wake/NREM/REM")
+        print(f"\n  Converting to 3-stage: Wake(0)/NREM(1)/REM(2)")
+        print(f"    Mapping: 0->0(Wake), 1,2,3->1(NREM), 4->2(REM)")
         labels = convert_to_3stage(labels)
+        
+        print(f"  After 3-stage conversion:")
+        for lbl in [0, 1, 2]:
+            count = np.sum(labels == lbl)
+            name = STAGE_NAMES_3.get(lbl, f"Class_{lbl}")
+            print(f"    {name}({lbl}): {count} ({100*count/len(labels):.1f}%)")
     
     labels, label_map = remap_labels_continuous(labels)
     num_classes = len(np.unique(labels))
     
-    print(f"  Remapped to: {label_map}")
+    print(f"\n  Final label mapping: {label_map}")
     print(f"  Number of classes: {num_classes}")
     
-    print(f"\n  Class distribution:")
+    print(f"\n  Final class distribution:")
     for old_label, new_label in label_map.items():
         count = np.sum(labels == new_label)
         name = stage_names.get(old_label, f"Class_{old_label}")
-        print(f"    {name}: {count} samples ({100*count/len(labels):.1f}%)")
+        print(f"    {name} (label={new_label}): {count} samples ({100*count/len(labels):.1f}%)")
     
     print(f"\n[3/6] Splitting data (Train {int((1-test_ratio)*100)}% : Test {int(test_ratio*100)}%)...")
     data = split_data(features, labels, test_ratio=test_ratio)
@@ -427,8 +438,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--stages", type=int, default=5, choices=[3, 5],
                         help="Number of sleep stages: 3 (Wake/NREM/REM) or 5 (Wake/N1/N2/N3/REM)")
-    parser.add_argument("--aug", default="medium", choices=["light", "medium", "strong", "aggressive"],
-                        help="Augmentation strength (default: medium)")
+    parser.add_argument("--aug", default="medium", choices=["none", "light", "medium", "strong", "aggressive"],
+                        help="Augmentation strength (default: medium, use 'none' to disable)")
     parser.add_argument("--oversample", type=float, default=1.0,
                         help="Oversample factor for minority classes (default: 1.0, try 1.5-2.0)")
     args = parser.parse_args()

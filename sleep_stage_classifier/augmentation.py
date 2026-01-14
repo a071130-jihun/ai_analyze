@@ -214,6 +214,9 @@ class RandomApply:
 
 
 def get_train_transform(strength: str = "medium"):
+    if strength == "none" or strength is None:
+        return None
+    
     if strength == "light":
         return Compose([
             SpecAugment(freq_mask_param=10, time_mask_param=10, n_freq_masks=1, n_time_masks=1, p=0.3),
