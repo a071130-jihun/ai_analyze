@@ -524,18 +524,33 @@ class Trainer:
         self.history = checkpoint.get("history", self.history)
 
 
-def compute_class_weights(labels: np.ndarray, power: float = 0.4, max_weight: float = 3.5) -> np.ndarray:
+def compute_class_weights(
+    labels: np.ndarray, 
+    power: float = 0.6,
+    max_weight: float = 5.0,
+    wake_boost: float = 1.5,
+    nrem_penalty: float = 0.7
+) -> np.ndarray:
     unique, counts = np.unique(labels, return_counts=True)
     total = len(labels)
+    num_classes = len(unique)
     
     freq = counts / total
     weights = (1.0 / freq) ** power
-    weights = weights / weights.min()
-    weights = np.clip(weights, 1.0, max_weight)
+    weights = weights / weights.mean()
     
     full_weights = np.ones(max(unique) + 1)
     for u, w in zip(unique, weights):
         full_weights[u] = w
     
-    print(f"  Class weights: {dict(zip(unique, weights))}")
+    if num_classes == 3:
+        full_weights[0] = full_weights[0] * wake_boost
+        full_weights[1] = nrem_penalty
+        
+    full_weights = np.clip(full_weights, 0.5, max_weight)
+    
+    print(f"  Class weights (power={power}, wake_boost={wake_boost}, nrem_penalty={nrem_penalty}):")
+    for u in unique:
+        print(f"    Class {u}: {full_weights[u]:.2f}")
+    
     return full_weights
