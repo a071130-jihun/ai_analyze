@@ -81,7 +81,9 @@ class Trainer:
         train_config: TrainConfig = None,
         class_weights: np.ndarray = None,
         use_amp: bool = True,
-        use_compile: bool = True
+        use_compile: bool = True,
+        use_focal_loss: bool = False,
+        focal_gamma: float = 2.0
     ):
         self.config = train_config or TrainConfig()
         
@@ -106,12 +108,19 @@ class Trainer:
             except Exception as e:
                 print(f"  torch.compile() failed, using eager mode: {e}")
         
+        self.use_focal_loss = use_focal_loss
+        
         if class_weights is not None:
             class_weights = torch.FloatTensor(class_weights).to(self.device)
-        self.criterion = nn.CrossEntropyLoss(
-            weight=class_weights,
-            label_smoothing=self.config.label_smoothing
-        )
+        
+        if use_focal_loss:
+            self.criterion = FocalLoss(alpha=class_weights, gamma=focal_gamma)
+            print(f"  Using FocalLoss (gamma={focal_gamma})")
+        else:
+            self.criterion = nn.CrossEntropyLoss(
+                weight=class_weights,
+                label_smoothing=self.config.label_smoothing
+            )
         
         self.optimizer = AdamW(
             self.model.parameters(),

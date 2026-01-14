@@ -463,19 +463,29 @@ def run_pipeline(
     print(f"  Train batches: {len(train_loader)}")
     print(f"  Val batches: {len(val_loader)}")
     
-    print(f"\n  ⚠️  Balanced Sampling이 활성화되어 있으므로 Loss class_weights는 비활성화됩니다.")
-    print(f"      (이중 균형화 방지 - 소수 클래스 과대예측 문제 해결)")
-    
     train_config = TrainConfig(
         num_epochs=epochs,
         batch_size=batch_size,
         device=device
     )
     
+    use_focal = True
+    focal_gamma = 3.0
+    
+    if use_focal:
+        class_weights = compute_class_weights(data["train_labels"])[:num_classes]
+        print(f"\n  Using Focal Loss (gamma={focal_gamma}) with class weights")
+        print(f"  Class weights: {dict(enumerate(class_weights[:num_classes].round(2)))}")
+    else:
+        class_weights = None
+        print(f"\n  Using CrossEntropyLoss (no class weights - balanced sampling active)")
+    
     trainer = Trainer(
         model=model,
         train_config=train_config,
-        class_weights=None
+        class_weights=class_weights,
+        use_focal_loss=use_focal,
+        focal_gamma=focal_gamma
     )
     
     print()
@@ -564,6 +574,10 @@ if __name__ == "__main__":
                         help="Augmentation strength (default: medium, use 'none' to disable)")
     parser.add_argument("--oversample", type=float, default=1.0,
                         help="Oversample factor for minority classes (default: 1.0, try 1.5-2.0)")
+    parser.add_argument("--focal", action="store_true", default=True,
+                        help="Use Focal Loss (default: True)")
+    parser.add_argument("--focal_gamma", type=float, default=3.0,
+                        help="Focal Loss gamma parameter (default: 3.0)")
     args = parser.parse_args()
     
     run_pipeline(
