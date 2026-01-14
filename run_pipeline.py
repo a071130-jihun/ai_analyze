@@ -105,13 +105,20 @@ def split_data_by_subject(
     test_features = np.concatenate([features_per_subject[s] for s in test_subjects])
     test_labels = np.concatenate([labels_per_subject[s] for s in test_subjects])
     
+    n_train = len(train_labels)
+    n_test = len(test_labels)
+    train_indices = np.arange(n_train)
+    test_indices = np.arange(n_train, n_train + n_test)
+    
     return {
         "train_features": train_features,
         "train_labels": train_labels,
         "test_features": test_features,
         "test_labels": test_labels,
         "train_subjects": train_subjects,
-        "test_subjects": test_subjects
+        "test_subjects": test_subjects,
+        "train_indices": train_indices,
+        "test_indices": test_indices
     }
 
 
@@ -209,25 +216,26 @@ def create_loaders(
             num_samples=num_samples,
             replacement=True
         )
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, num_workers=0)
-        
-        val_class_counts = np.bincount(val_labels, minlength=len(class_counts))
-        val_class_weights = 1.0 / (val_class_counts + 1e-8)
-        val_class_weights = val_class_weights / val_class_weights.min()
-        val_sample_weights = val_class_weights[val_labels]
-        
-        val_sampler = WeightedRandomSampler(
-            weights=val_sample_weights,
-            num_samples=len(val_labels),
-            replacement=True
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, sampler=train_sampler, 
+            num_workers=4, pin_memory=True, persistent_workers=True
         )
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler, num_workers=0)
+        val_loader = DataLoader(
+            val_dataset, batch_size=batch_size, shuffle=False, 
+            num_workers=4, pin_memory=True, persistent_workers=True
+        )
         
-        print(f"  Augmentation: {aug_strength}, Balanced sampling: Train+Val")
+        print(f"  Augmentation: {aug_strength}, Balanced sampling: Train only (Val keeps real distribution)")
         print(f"  Train class weights: {dict(enumerate(class_weights[:len(class_counts)].round(2)))}")
     else:
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True, 
+            num_workers=4, pin_memory=True, persistent_workers=True
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=batch_size, shuffle=False, 
+            num_workers=4, pin_memory=True, persistent_workers=True
+        )
     
     print(f"  Train samples: {len(train_labels)}, Val samples: {len(val_labels)}")
     
@@ -476,8 +484,21 @@ def run_pipeline(
     print(f"\n  Model saved: {model_path}")
     
     print(f"\n[6/6] Evaluating on TEST SET...")
+    
+    test_label_counts = np.bincount(data["test_labels"], minlength=num_classes)
+    print(f"  Test set distribution:")
+    for i, count in enumerate(test_label_counts):
+        name = stage_names.get(i, f"Class_{i}")
+        print(f"    {name}: {count} ({100*count/len(data['test_labels']):.1f}%)")
+    
     test_features_norm = (data["test_features"] - feat_mean) / feat_std
     metrics = evaluate_model(model, test_features_norm, data["test_labels"], device)
+    
+    pred_counts = np.bincount(metrics["predictions"], minlength=num_classes)
+    print(f"  Model predictions distribution:")
+    for i, count in enumerate(pred_counts):
+        name = stage_names.get(i, f"Class_{i}")
+        print(f"    {name}: {count} ({100*count/len(metrics['predictions']):.1f}%)")
     
     print("\n" + "=" * 70)
     print("  FINAL RESULTS (TEST SET - NOT SEEN DURING TRAINING)")
@@ -530,7 +551,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sleep Stage Classification Pipeline")
     parser.add_argument("--edf_dir", default=EDF_DIR)
     parser.add_argument("--rml_dir", default=RML_DIR)
-    parser.add_argument("--model", default="cnn", choices=["cnn", "crnn", "transformer"])
+    parser.add_argument("--model", default="cnn", choices=["cnn", "crnn", "transformer", "deep_transformer"])
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--test_ratio", type=float, default=0.2, help="Test set ratio (default: 0.2 = 20%%)")
     parser.add_argument("--batch_size", type=int, default=16)

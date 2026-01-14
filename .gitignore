@@ -17,3 +17,6 @@ APNEA_RML/
 .DS_Store
 *.swp
 *.swo
+수면1.m4a
+health_connect_export.db
+best_model.pt

@@ -79,14 +79,32 @@ class Trainer:
         self,
         model: nn.Module,
         train_config: TrainConfig = None,
-        class_weights: np.ndarray = None
+        class_weights: np.ndarray = None,
+        use_amp: bool = True,
+        use_compile: bool = True
     ):
         self.config = train_config or TrainConfig()
         
         self.device = torch.device(
             self.config.device if torch.cuda.is_available() else "cpu"
         )
+        
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        
         self.model = model.to(self.device)
+        
+        self.use_amp = use_amp and torch.cuda.is_available()
+        self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
+        
+        if use_compile and hasattr(torch, 'compile'):
+            try:
+                self.model = torch.compile(self.model, mode='reduce-overhead')
+                print("  torch.compile() enabled")
+            except Exception as e:
+                print(f"  torch.compile() failed, using eager mode: {e}")
         
         if class_weights is not None:
             class_weights = torch.FloatTensor(class_weights).to(self.device)
@@ -206,22 +224,30 @@ class Trainer:
         all_labels = []
         
         for batch_x, batch_y in train_loader:
-            batch_x = batch_x.to(self.device)
-            batch_y = batch_y.to(self.device)
+            batch_x = batch_x.to(self.device, non_blocking=True)
+            batch_y = batch_y.to(self.device, non_blocking=True)
             
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             
-            if use_mixup and np.random.random() < 0.5:
-                mixed_x, y_a, y_b, lam = mixup_data(batch_x, batch_y, mixup_alpha)
-                outputs = self.model(mixed_x)
-                loss = mixup_criterion(self.criterion, outputs, y_a, y_b, lam)
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
+                if use_mixup and np.random.random() < 0.5:
+                    mixed_x, y_a, y_b, lam = mixup_data(batch_x, batch_y, mixup_alpha)
+                    outputs = self.model(mixed_x)
+                    loss = mixup_criterion(self.criterion, outputs, y_a, y_b, lam)
+                else:
+                    outputs = self.model(batch_x)
+                    loss = self.criterion(outputs, batch_y)
+            
+            if self.use_amp:
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
             else:
-                outputs = self.model(batch_x)
-                loss = self.criterion(outputs, batch_y)
-            
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
             
             total_loss += loss.item()
             preds = outputs.argmax(dim=1).cpu().numpy()
@@ -241,11 +267,12 @@ class Trainer:
         all_labels = []
         
         for batch_x, batch_y in val_loader:
-            batch_x = batch_x.to(self.device)
-            batch_y = batch_y.to(self.device)
+            batch_x = batch_x.to(self.device, non_blocking=True)
+            batch_y = batch_y.to(self.device, non_blocking=True)
             
-            outputs = self.model(batch_x)
-            loss = self.criterion(outputs, batch_y)
+            with torch.amp.autocast('cuda', enabled=self.use_amp):
+                outputs = self.model(batch_x)
+                loss = self.criterion(outputs, batch_y)
             
             total_loss += loss.item()
             preds = outputs.argmax(dim=1).cpu().numpy()
