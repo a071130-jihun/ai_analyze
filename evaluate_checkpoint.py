@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Best model checkpoint 평가 스크립트
-Usage: python evaluate_checkpoint.py --model <model_path> --stages 3
+Usage: 
+  CNN:  python evaluate_checkpoint.py --model ./output/sleep_stage_cnn.pt --stages 3
+  CRNN: python evaluate_checkpoint.py --model ./output/sleep_stage_crnn.pt --stages 3 --seq_len 11
 """
 import sys
 import os
@@ -18,6 +20,7 @@ from sklearn.metrics import (
 )
 
 from sleep_stage_classifier.models.classifier import get_model
+from sleep_stage_classifier.models.sequence_model import SleepSequenceModel
 
 STAGE_NAMES_5 = {0: "Wake", 1: "N1", 2: "N2", 3: "N3", 4: "REM"}
 STAGE_NAMES_3 = {0: "Wake", 1: "NREM", 2: "REM"}
@@ -43,21 +46,30 @@ def load_from_cache(cache_dir="./cache"):
 
 
 def convert_to_3stage(labels):
-    mapping = {0: 0, 1: 1, 2: 1, 3: 1, 4: 2}
-    return np.array([mapping.get(l, 1) for l in labels])
+    mapping = np.array([0, 1, 1, 1, 2], dtype=np.int32)
+    return mapping[np.clip(labels, 0, 4)]
 
 
 def remap_labels(labels):
     unique_labels = np.unique(labels)
     label_map = {old: new for new, old in enumerate(unique_labels)}
-    remapped = np.array([label_map[l] for l in labels])
+    mapping_arr = np.zeros(max(unique_labels) + 1, dtype=np.int32)
+    for old, new in label_map.items():
+        mapping_arr[old] = new
+    remapped = mapping_arr[labels]
     return remapped, label_map
 
 
-def standardize_features(train_features, test_features):
-    mean = train_features.mean(axis=(0, 1, 2), keepdims=True)
-    std = train_features.std(axis=(0, 1, 2), keepdims=True) + 1e-8
-    return (test_features - mean) / std
+def standardize_features(features, robust=True):
+    if robust:
+        p5 = np.percentile(features, 5)
+        p95 = np.percentile(features, 95)
+        mean = (p5 + p95) / 2
+        std = (p95 - p5) / 2 + 1e-8
+    else:
+        mean = features.mean()
+        std = features.std() + 1e-8
+    return (features - mean) / std
 
 
 def evaluate_batch(model, features, device="cuda", batch_size=256):
@@ -82,35 +94,100 @@ def evaluate_batch(model, features, device="cuda", batch_size=256):
     return np.array(all_preds), np.array(all_probs)
 
 
+def evaluate_sequence(model, features, labels, seq_len, device="cuda", batch_size=64):
+    if device == "cuda":
+        torch.cuda.empty_cache()
+        import gc
+        gc.collect()
+    
+    model.eval()
+    half_seq = seq_len // 2
+    
+    valid_indices = list(range(half_seq, len(labels) - half_seq))
+    all_preds = []
+    all_probs = []
+    valid_labels = []
+    
+    print(f"  Evaluating {len(valid_indices)} samples with seq_len={seq_len}...")
+    
+    with torch.no_grad():
+        for batch_start in range(0, len(valid_indices), batch_size):
+            batch_indices = valid_indices[batch_start:batch_start + batch_size]
+            
+            batch_seqs = []
+            batch_labels = []
+            for center_idx in batch_indices:
+                start_idx = center_idx - half_seq
+                end_idx = center_idx + half_seq + 1
+                seq = torch.FloatTensor(features[start_idx:end_idx]).unsqueeze(1)
+                batch_seqs.append(seq)
+                batch_labels.append(labels[center_idx])
+            
+            batch_tensor = torch.stack(batch_seqs).to(device)
+            outputs = model(batch_tensor)
+            probs = torch.softmax(outputs, dim=1).cpu().numpy()
+            preds = outputs.argmax(dim=1).cpu().numpy()
+            
+            all_preds.extend(preds)
+            all_probs.extend(probs)
+            valid_labels.extend(batch_labels)
+            
+            del batch_tensor, outputs
+            if device == "cuda":
+                torch.cuda.empty_cache()
+            
+            if (batch_start // batch_size) % 100 == 0:
+                print(f"    Progress: {batch_start}/{len(valid_indices)}")
+    
+    return np.array(all_preds), np.array(all_probs), np.array(valid_labels)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate saved model checkpoint")
     parser.add_argument("--model", required=True, help="Path to model checkpoint (.pt file)")
     parser.add_argument("--cache", default="./cache", help="Cache directory")
     parser.add_argument("--stages", type=int, default=3, choices=[3, 5], help="Number of stages")
     parser.add_argument("--test_ratio", type=float, default=0.2, help="Test ratio")
+    parser.add_argument("--seq_len", type=int, default=0, help="Sequence length (0=auto detect, >0 for sequence model)")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for evaluation")
     args = parser.parse_args()
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
     
     stage_names = STAGE_NAMES_3 if args.stages == 3 else STAGE_NAMES_5
+    num_classes = 3 if args.stages == 3 else 5
     
     print(f"\n[1/4] Loading model from: {args.model}")
     checkpoint = torch.load(args.model, map_location=device, weights_only=False)
     
-    if "config" in checkpoint:
-        print(f"  Config found in checkpoint")
-    if "epoch" in checkpoint:
-        print(f"  Epoch: {checkpoint['epoch'] + 1}")
-    if "metric_value" in checkpoint:
-        print(f"  Best {checkpoint.get('metric_name', 'metric')}: {checkpoint['metric_value']:.4f}")
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+        if "epoch" in checkpoint:
+            print(f"  Epoch: {checkpoint['epoch'] + 1}")
+        if "metric_value" in checkpoint:
+            print(f"  Best {checkpoint.get('metric_name', 'metric')}: {checkpoint['metric_value']:.4f}")
+    else:
+        state_dict = checkpoint
     
-    num_classes = args.stages if args.stages == 3 else 5
-    model = get_model(model_type="cnn", num_classes=num_classes)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    is_sequence_model = any("backbone" in k or "temporal_lstm" in k for k in state_dict.keys())
+    
+    if is_sequence_model:
+        seq_len = args.seq_len if args.seq_len > 0 else 11
+        print(f"  Detected: Sequence Model (seq_len={seq_len})")
+        model = SleepSequenceModel(num_classes=num_classes, hidden_dim=256, seq_len=seq_len)
+    else:
+        seq_len = 0
+        print(f"  Detected: CNN Model")
+        model = get_model(model_type="cnn", num_classes=num_classes)
+    
+    model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
     print("  Model loaded!")
+    
+    param_count = sum(p.numel() for p in model.parameters())
+    print(f"  Parameters: {param_count:,}")
     
     print(f"\n[2/4] Loading data from cache: {args.cache}")
     features, labels = load_from_cache(args.cache)
@@ -133,18 +210,26 @@ def main():
     test_indices = indices[:test_size]
     train_indices = indices[test_size:]
     
-    train_features = features[train_indices]
     test_features = features[test_indices]
     test_labels = labels[test_indices]
     
-    print(f"  Train samples (for normalization): {len(train_indices)}")
     print(f"  Test samples: {len(test_labels)}")
     
-    print(f"\n  Standardizing features...")
-    test_features_norm = standardize_features(train_features, test_features)
+    print(f"\n  Standardizing features (robust)...")
+    test_features_norm = standardize_features(test_features, robust=True)
     
     print(f"\n[4/4] Evaluating...")
-    predictions, probabilities = evaluate_batch(model, test_features_norm, device=device)
+    
+    if is_sequence_model:
+        predictions, probabilities, test_labels = evaluate_sequence(
+            model, test_features_norm, test_labels, 
+            seq_len=seq_len, device=device, batch_size=args.batch_size
+        )
+    else:
+        predictions, probabilities = evaluate_batch(
+            model, test_features_norm, 
+            device=device, batch_size=args.batch_size
+        )
     
     accuracy = accuracy_score(test_labels, predictions)
     f1_macro = f1_score(test_labels, predictions, average='macro', zero_division=0)
@@ -197,13 +282,14 @@ def main():
         print(f"{target_names[i]:>6} | {row_str}")
     
     print("\n" + "-" * 70)
-    print("  Class Distribution (Test Set):")
+    print("  Class Distribution:")
     print("-" * 70)
     unique, counts = np.unique(test_labels, return_counts=True)
     for u, c in zip(unique, counts):
         name = stage_names.get(u, f"Class_{u}")
         pred_count = np.sum(predictions == u)
-        print(f"    {name}: {c} actual, {pred_count} predicted ({100*c/len(test_labels):.1f}%)")
+        recall = np.sum((predictions == u) & (test_labels == u)) / c if c > 0 else 0
+        print(f"    {name}: {c} actual, {pred_count} predicted (recall: {recall*100:.1f}%)")
     
     print("\n" + "=" * 70)
 
