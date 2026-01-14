@@ -36,19 +36,16 @@ def find_subject_ids_from_cache(cache_dir: str):
 def remap_labels_continuous(labels: np.ndarray):
     unique_labels = np.unique(labels)
     label_map = {old: new for new, old in enumerate(unique_labels)}
-    remapped = np.array([label_map[l] for l in labels])
+    mapping_arr = np.zeros(max(unique_labels) + 1, dtype=np.int32)
+    for old, new in label_map.items():
+        mapping_arr[old] = new
+    remapped = mapping_arr[labels]
     return remapped, label_map
 
 
 def convert_to_3stage(labels: np.ndarray):
-    """5단계 → 3단계 변환 (논문 기반)
-    Wake(0) → 0 (Wake)
-    N1(1), N2(2), N3(3) → 1 (NREM)
-    REM(4) → 2 (REM)
-    """
-    mapping = {0: 0, 1: 1, 2: 1, 3: 1, 4: 2}
-    converted = np.array([mapping.get(l, 1) for l in labels])
-    return converted
+    mapping_arr = np.array([0, 1, 1, 1, 2], dtype=np.int32)
+    return mapping_arr[np.clip(labels, 0, 4)]
 
 
 STAGE_NAMES_3 = {0: "Wake", 1: "NREM", 2: "REM"}
@@ -410,9 +407,11 @@ def run_pipeline(
     labels, label_map = remap_labels_continuous(labels)
     
     if labels_per_subject is not None:
+        mapping_arr = np.zeros(max(label_map.keys()) + 1, dtype=np.int32)
+        for old, new in label_map.items():
+            mapping_arr[old] = new
         labels_per_subject = {
-            sid: np.array([label_map[l] for l in lbl]) 
-            for sid, lbl in labels_per_subject.items()
+            sid: mapping_arr[lbl] for sid, lbl in labels_per_subject.items()
         }
     num_classes = len(np.unique(labels))
     

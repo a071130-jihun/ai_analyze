@@ -2,6 +2,8 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 import numpy as np
 import pickle
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import multiprocessing as mp
 
 try:
     import torch
@@ -157,20 +159,55 @@ class PSGDataProcessor:
         
         return mel_features, numeric_labels
     
+    def _load_cached_subject(self, subject_id: str) -> Tuple[str, np.ndarray, np.ndarray]:
+        if self.cache_dir:
+            cache_path = self.cache_dir / f"{subject_id}_features.pkl"
+            if cache_path.exists():
+                with open(cache_path, 'rb') as f:
+                    cached = pickle.load(f)
+                return subject_id, cached['features'], cached['labels']
+        return subject_id, None, None
+    
     def process_multiple_subjects(
         self,
         edf_dir: str,
         rml_dir: str,
         subject_ids: List[str],
         verbose: bool = True,
-        return_per_subject: bool = False
+        return_per_subject: bool = False,
+        num_workers: int = None
     ) -> Tuple[np.ndarray, np.ndarray]:
         features_dict = {}
         labels_dict = {}
         
-        for i, subject_id in enumerate(subject_ids):
+        if num_workers is None:
+            num_workers = min(8, mp.cpu_count())
+        
+        cached_subjects = []
+        uncached_subjects = []
+        
+        if self.cache_dir and len(subject_ids) > 1:
+            print(f"  Checking cache with {num_workers} threads...")
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                results = list(executor.map(self._load_cached_subject, subject_ids))
+            
+            for subject_id, features, labels in results:
+                if features is not None:
+                    features_dict[subject_id] = features
+                    labels_dict[subject_id] = labels
+                    cached_subjects.append(subject_id)
+                else:
+                    uncached_subjects.append(subject_id)
+            
+            if cached_subjects:
+                total_cached = sum(len(labels_dict[s]) for s in cached_subjects)
+                print(f"  Loaded {len(cached_subjects)} subjects from cache ({total_cached} epochs)")
+        else:
+            uncached_subjects = subject_ids
+        
+        for i, subject_id in enumerate(uncached_subjects):
             if verbose:
-                print(f"\n[{i+1}/{len(subject_ids)}] Processing {subject_id}...")
+                print(f"\n[{i+1}/{len(uncached_subjects)}] Processing {subject_id}...")
             try:
                 features, labels = self.process_subject(edf_dir, rml_dir, subject_id, verbose)
                 features_dict[subject_id] = features
