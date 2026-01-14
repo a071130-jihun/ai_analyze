@@ -169,10 +169,13 @@ class SleepStageTransformer(nn.Module):
 
 
 def get_model(model_type: str = "cnn", **kwargs) -> nn.Module:
+    from .sequence_model import SleepSequenceModel
+    
     models = {
         "cnn": SleepStageCNN,
         "crnn": SleepStageCRNN,
-        "transformer": SleepStageTransformer
+        "transformer": SleepStageTransformer,
+        "sequence": SleepSequenceModel,
     }
     
     if model_type not in models:

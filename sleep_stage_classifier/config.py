@@ -33,6 +33,7 @@ class TrainConfig:
     test_ratio: float = 0.15
     num_workers: int = 4
     device: str = "cuda"
+    label_smoothing: float = 0.1
     
 
 @dataclass

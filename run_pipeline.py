@@ -40,6 +40,20 @@ def remap_labels_continuous(labels: np.ndarray):
     return remapped, label_map
 
 
+def convert_to_3stage(labels: np.ndarray):
+    """5단계 → 3단계 변환 (논문 기반)
+    Wake(0) → 0 (Wake)
+    N1(1), N2(2), N3(3) → 1 (NREM)
+    REM(4) → 2 (REM)
+    """
+    mapping = {0: 0, 1: 1, 2: 1, 3: 1, 4: 2}
+    converted = np.array([mapping.get(l, 1) for l in labels])
+    return converted
+
+
+STAGE_NAMES_3 = {0: "Wake", 1: "NREM", 2: "REM"}
+
+
 def split_data(features, labels, test_ratio=0.2, random_seed=42):
     np.random.seed(random_seed)
     n_samples = len(labels)
@@ -59,9 +73,10 @@ def split_data(features, labels, test_ratio=0.2, random_seed=42):
     }
 
 
-def create_loaders(features, labels, batch_size=16, val_ratio=0.15):
+def create_loaders(features, labels, batch_size=16, val_ratio=0.15, use_augmentation=True):
     import torch
     from torch.utils.data import DataLoader
+    from sleep_stage_classifier.augmentation import get_train_transform
     
     n_samples = len(labels)
     indices = np.random.permutation(n_samples)
@@ -70,7 +85,8 @@ def create_loaders(features, labels, batch_size=16, val_ratio=0.15):
     val_idx = indices[:val_size]
     train_idx = indices[val_size:]
     
-    train_dataset = SleepStageDataset(features[train_idx], labels[train_idx])
+    train_transform = get_train_transform() if use_augmentation else None
+    train_dataset = SleepStageDataset(features[train_idx], labels[train_idx], transform=train_transform)
     val_dataset = SleepStageDataset(features[val_idx], labels[val_idx])
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -165,13 +181,16 @@ def run_pipeline(
     model_type: str = "cnn",
     epochs: int = 30,
     test_ratio: float = 0.2,
-    batch_size: int = 16
+    batch_size: int = 16,
+    num_stages: int = 5
 ):
     import torch
     
     torch.set_num_threads(4)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"  Using device: {device}")
+    
+    stage_names = STAGE_NAMES if num_stages == 5 else STAGE_NAMES_3
     
     print("=" * 70)
     print("  SLEEP STAGE CLASSIFICATION PIPELINE")
@@ -211,17 +230,22 @@ def run_pipeline(
     
     print("\n[2/6] Preprocessing labels...")
     unique_orig = np.unique(labels)
+    print(f"  Original labels: {list(unique_orig)}")
+    
+    if num_stages == 3:
+        print(f"  Converting to 3-stage: Wake/NREM/REM")
+        labels = convert_to_3stage(labels)
+    
     labels, label_map = remap_labels_continuous(labels)
     num_classes = len(np.unique(labels))
     
-    print(f"  Original labels: {list(unique_orig)}")
     print(f"  Remapped to: {label_map}")
     print(f"  Number of classes: {num_classes}")
     
     print(f"\n  Class distribution:")
     for old_label, new_label in label_map.items():
         count = np.sum(labels == new_label)
-        name = SLEEP_STAGE_NAMES.get(old_label, f"Unknown_{old_label}")
+        name = stage_names.get(old_label, f"Class_{old_label}")
         print(f"    {name}: {count} samples ({100*count/len(labels):.1f}%)")
     
     print(f"\n[3/6] Splitting data (Train {int((1-test_ratio)*100)}% : Test {int(test_ratio*100)}%)...")
@@ -288,7 +312,7 @@ def run_pipeline(
     
     print("\n  Classification Report:")
     present_classes = np.unique(np.concatenate([data["test_labels"], metrics["predictions"]]))
-    target_names = [STAGE_NAMES.get(i, f"Class_{i}") for i in present_classes]
+    target_names = [stage_names.get(i, f"Class_{i}") for i in present_classes]
     print(classification_report(
         data["test_labels"], 
         metrics["predictions"],
@@ -333,6 +357,8 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--test_ratio", type=float, default=0.2, help="Test set ratio (default: 0.2 = 20%%)")
     parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--stages", type=int, default=5, choices=[3, 5],
+                        help="Number of sleep stages: 3 (Wake/NREM/REM) or 5 (Wake/N1/N2/N3/REM)")
     args = parser.parse_args()
     
     run_pipeline(
@@ -341,5 +367,6 @@ if __name__ == "__main__":
         model_type=args.model,
         epochs=args.epochs,
         test_ratio=args.test_ratio,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        num_stages=args.stages
     )

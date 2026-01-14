@@ -74,7 +74,10 @@ class Trainer:
         
         if class_weights is not None:
             class_weights = torch.FloatTensor(class_weights).to(self.device)
-        self.criterion = nn.CrossEntropyLoss(weight=class_weights)
+        self.criterion = nn.CrossEntropyLoss(
+            weight=class_weights,
+            label_smoothing=self.config.label_smoothing
+        )
         
         self.optimizer = AdamW(
             self.model.parameters(),
@@ -93,7 +96,9 @@ class Trainer:
             "val_f1": []
         }
     
-    def train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
+    def train_epoch(self, train_loader: DataLoader, use_mixup: bool = True, mixup_alpha: float = 0.2) -> Tuple[float, float]:
+        from .augmentation import mixup_data, mixup_criterion
+        
         self.model.train()
         total_loss = 0.0
         all_preds = []
@@ -104,8 +109,14 @@ class Trainer:
             batch_y = batch_y.to(self.device)
             
             self.optimizer.zero_grad()
-            outputs = self.model(batch_x)
-            loss = self.criterion(outputs, batch_y)
+            
+            if use_mixup and np.random.random() < 0.5:
+                mixed_x, y_a, y_b, lam = mixup_data(batch_x, batch_y, mixup_alpha)
+                outputs = self.model(mixed_x)
+                loss = mixup_criterion(self.criterion, outputs, y_a, y_b, lam)
+            else:
+                outputs = self.model(batch_x)
+                loss = self.criterion(outputs, batch_y)
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
